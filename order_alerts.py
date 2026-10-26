@@ -31,6 +31,7 @@ from eldorado_client import EldoradoClient
 load_dotenv()
 
 LEDGER_FILE = Path("ledger.json")
+HISTORY_FILE = Path("history.json")   # every time an order is added to or taken off the totals
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "60"))
 EMBED_COLOR = 0x2ECC71  # green bar on the left
 SHOP_NAME = os.getenv("SHOP_NAME", "Eldorado Orders")  # footer text
@@ -145,6 +146,25 @@ def load_ledger():
 
 def save_ledger(ledger):
     LEDGER_FILE.write_text(json.dumps(ledger))
+
+
+def log_event(kind, oid, entry):
+    """kind: "add" (new order counted) or "remove" (cancelled / refunded, taken off again).
+    Kept in history.json so the dashboard can show when money came and went."""
+    try:
+        try:
+            events = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            events = []
+        events.append({"t": datetime.now(timezone.utc).isoformat(), "k": kind, "id": oid,
+                       "ots": entry.get("ts") or "", "amount": float(entry.get("amount") or 0),
+                       "currency": entry.get("currency") or "USD", "buyer": entry.get("buyer") or "",
+                       "item": entry.get("item") or "", "qty": entry.get("qty") or 1})
+        tmp = HISTORY_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(events[-3000:], ensure_ascii=False), encoding="utf-8")
+        tmp.replace(HISTORY_FILE)
+    except Exception as e:  # the history must never stop the order alerts
+        print(f"History not saved: {type(e).__name__}", flush=True)
 
 
 # ---------- messages ----------
@@ -310,6 +330,7 @@ def check_once(client, ledger, send=notify):
     canceled = fetch_canceled_ids(client) | load_ignored()
     removed = [oid for oid in canceled if oid in ledger]
     for oid in removed:  # cancelled / refunded: take it out of the totals again
+        log_event("remove", oid, ledger[oid])
         del ledger[oid]
     if removed:
         print(f"Removed {len(removed)} cancelled order(s) from the totals.", flush=True)
@@ -324,6 +345,7 @@ def check_once(client, ledger, send=notify):
         if floor and local_date(order_time(o)) < floor:
             continue
         record(ledger, o)  # record first, so the totals include this order
+        log_event("add", o["id"], ledger[o["id"]])
         if state == "Paid" or is_fresh(o):
             send(*build_message(o, ledger))
     return ledger
@@ -348,6 +370,7 @@ def cli(args):
                 f.write(oid + "\n")
             if oid in ledger:
                 e = ledger.pop(oid)
+                log_event("remove", oid, e)
                 print(f"Removed {oid} ({entry_date(e)}, {float(e['amount']):.2f} {e['currency']}).")
             else:
                 print(f"{oid} was not in the ledger, but it is now ignored for good.")

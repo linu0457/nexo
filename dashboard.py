@@ -770,6 +770,77 @@ def profit_brief():
             "all_dkk": round(p["total"]["profit"] * dkk["rates"].get("DKK", 1), 2), "dkk_live": dkk["live"]}
 
 
+# ---------- history: when money was added (new order) and taken off again (cancelled) ----------
+
+def _demo_history(led):
+    rnd = random.Random(11)
+    rows = sorted(led.items(), key=lambda kv: kv[1]["ts"], reverse=True)[:70]
+    out = []
+    for i, (oid, e) in enumerate(rows):
+        out.append({"t": e["ts"], "k": "add", "id": oid, "ots": e["ts"], "amount": e["amount"], "currency": e["currency"],
+                    "buyer": e.get("buyer", ""), "item": e.get("item", ""), "qty": e.get("qty", 1)})
+        if i % 11 == 7:   # a few of them got cancelled later
+            t = datetime.fromisoformat(e["ts"]) + timedelta(minutes=rnd.randint(20, 400))
+            if t < datetime.now(timezone.utc):
+                out.append({"t": t.isoformat(), "k": "remove", "id": oid[:-2] + "ff", "ots": e["ts"], "amount": e["amount"],
+                            "currency": e["currency"], "buyer": e.get("buyer", ""), "item": e.get("item", ""), "qty": 1})
+    return out
+
+
+def history_view(kind, limit, offset):
+    fee, net_of, entry_date, today_date = fx()
+    led = ledger_now()
+    if DEMO:
+        st = demo_state()
+        if "history" not in st:
+            st["history"] = _demo_history(led)
+        raw = st["history"]
+    else:
+        from order_alerts import HISTORY_FILE
+        raw = jload(HISTORY_FILE, [])
+    ev, have = [], set()
+    for r in raw if isinstance(raw, list) else []:
+        if isinstance(r, dict) and r.get("k") in ("add", "remove") and r.get("t"):
+            ev.append(r)
+            if r["k"] == "add":
+                have.add(r.get("id"))
+    for oid, e in led.items():     # orders from before the history started: shown as added when they came in
+        if oid not in have:
+            ts = e.get("ts") or (e.get("date", "1970-01-01") + "T12:00:00+00:00")
+            ev.append({"t": ts, "k": "add", "id": oid, "ots": ts, "amount": e["amount"], "currency": e["currency"],
+                       "buyer": e.get("buyer", ""), "item": e.get("item", ""), "qty": e.get("qty", 1), "old": True})
+    ev.sort(key=lambda r: r["t"], reverse=True)
+    per = {}
+    for e in led.values():
+        per[e["currency"]] = per.get(e["currency"], 0.0) + net_of(e["amount"])
+    main = max(per, key=per.get, default="USD")
+    run = round(per.get(main, 0.0), 2)
+    today = today_date()
+    tot = {"added_today": 0.0, "removed_today": 0.0, "added_month": 0.0, "removed_month": 0.0, "n_added_today": 0, "n_removed_today": 0}
+    out = []
+    for r in ev:
+        net = net_of(r["amount"])
+        sign = 1 if r["k"] == "add" else -1
+        d = entry_date({"ts": r["t"], "date": r["t"][:10]})
+        if r["currency"] == main:
+            if d == today:
+                tot[("added" if sign > 0 else "removed") + "_today"] += net
+                tot["n_" + ("added" if sign > 0 else "removed") + "_today"] += 1
+            if d[:7] == today[:7]:
+                tot[("added" if sign > 0 else "removed") + "_month"] += net
+        bal = run if r["currency"] == main else None
+        if r["currency"] == main:
+            run = round(run - sign * net, 2)
+        if kind in ("add", "remove") and r["k"] != kind:
+            continue
+        out.append({"id": r.get("id", ""), "t": r["t"], "k": r["k"], "net": net, "gross": round(float(r["amount"]), 2),
+                    "currency": r["currency"], "buyer": r.get("buyer", ""), "item": r.get("item", ""), "qty": r.get("qty", 1),
+                    "old": bool(r.get("old")), "bal": bal})
+    tot = {k: round(v, 2) if isinstance(v, float) else v for k, v in tot.items()}
+    page = out[offset:offset + limit]
+    return {"events": page, "more": len(out) > offset + limit, "total": len(out), "currency": main, "balance": round(per.get(main, 0.0), 2), **tot}
+
+
 def stock_forecast(left):
     """Keys sold per day over the last 7 days, and how long the stock then lasts."""
     now = datetime.now(timezone.utc)
@@ -1013,6 +1084,20 @@ def api_data():
         return jsonify(same=True, h=h, updated=d.get("updated"))
     d["h"] = h
     return jsonify(d)
+
+
+@app.route("/api/history")
+def api_history():
+    bad = api_guard()
+    if bad:
+        return bad
+    kind = request.args.get("filter", "all")
+    try:
+        limit = max(1, min(500, int(request.args.get("limit", "100"))))
+        offset = max(0, int(request.args.get("offset", "0")))
+    except ValueError:
+        limit, offset = 100, 0
+    return jsonify(history_view(kind, limit, offset))
 
 
 @app.route("/api/keys", methods=["POST"])
@@ -2155,6 +2240,13 @@ body.hide .tip{display:none}
 @media (prefers-reduced-motion:reduce){.sk,.drawer,.toast2{animation:none;transition:none}}
 
 /* round 2 */
+.hday{display:flex;justify-content:space-between;align-items:baseline;margin:14px 0 4px;padding-bottom:6px;border-bottom:1px solid var(--line);font-weight:600}.hday:first-child{margin-top:0}.hday span{font-weight:500;color:var(--muted);font-size:13px}
+.hrow{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}.hrow:last-child{border-bottom:0}
+.hrow .t small{display:block;color:var(--muted);font-size:12.5px}.hrow .amt{font-weight:700;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.hrow .amt.add{color:var(--accent)}.hrow .amt.rem{color:var(--red)}.hrow .amt small{display:block;color:var(--muted);font-weight:400;font-size:12px}
+.hrow .ic{width:30px;height:30px;border-radius:99px;display:grid;place-items:center;font-weight:700;flex:none;background:var(--accentbg);color:var(--accent)}.hrow .ic.rem{background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)}
+.hrow .l{display:flex;gap:12px;align-items:center;min-width:0}.hrow .t{min-width:0;overflow-wrap:anywhere}
+body.hide .hrow .amt{filter:blur(7px);user-select:none}
 .taxpot{display:flex;align-items:baseline;justify-content:center;gap:8px;flex-wrap:wrap;text-align:center;margin:-6px 0 16px;color:var(--ink2);font-size:14px}
 .taxpot b{font-size:20px;color:var(--accent);font-variant-numeric:tabular-nums}.taxpot small{flex-basis:100%;color:var(--muted);font-size:12px}
 .tile .v.bad{color:var(--red)}.tile .v.warn{color:var(--amber)}
@@ -2225,6 +2317,14 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
   <div class="panel"><h2>Eldorado fees</h2><div class="rows dyn" id="fees"></div></div>
   <div class="panel"><h2>Monthly breakdown</h2><div class="scroll dyn" id="months"></div></div>
  </div>
+</section>
+
+<section class="page" id="p-history">
+ <div class="tiles dyn" id="htiles"><div class="sk tile"></div><div class="sk tile"></div><div class="sk tile"></div><div class="sk tile"></div></div>
+ <div class="bar2"><div class="seg" id="hseg"><button type="button" data-h="all" class="on">All</button><button type="button" data-h="add">Added</button><button type="button" data-h="remove">Removed</button></div><span class="muted" id="hnote"></span></div>
+ <div class="panel"><div class="dyn" id="hlist"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div>
+  <div class="row" style="margin-top:12px"><button class="btn" id="hmore" type="button" hidden>Show more</button></div>
+  <div class="muted" style="font-size:12.5px;margin-top:10px">Orders from before the history started are shown as added. Cancelled orders only show from when the history started.</div></div>
 </section>
 
 <section class="page" id="p-orders">
@@ -2352,6 +2452,7 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
  <nav id="nav">
   <a href="#overview" data-p="overview"><svg class="i" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>Overview</a>
   <a href="#sales" data-p="sales"><svg class="i" viewBox="0 0 24 24"><path d="M5 20V11M12 20V4M19 20v-6"/></svg>Sales</a>
+  <a href="#history" data-p="history"><svg class="i" viewBox="0 0 24 24"><path d="M3 12a9 9 0 109-9 9 9 0 00-7 3.4M3 4v4h4"/><path d="M12 8v4l3 2"/></svg>History</a>
   <a href="#orders" data-p="orders"><svg class="i" viewBox="0 0 24 24"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/></svg>Orders</a>
   <a href="#stock" data-p="stock"><svg class="i" viewBox="0 0 24 24"><path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg>Stock</a>
   <a href="#reviews" data-p="reviews"><svg class="i" viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></svg>Reviews</a>
@@ -2716,6 +2817,16 @@ const DA={
 "Waves": "Bølger",
 "Aurora": "Nordlys",
 "Diagonal": "Diagonal",
+"History": "Historik",
+"Removed": "Fratrukket",
+"Added today": "Tilføjet i dag",
+"Removed today": "Fratrukket i dag",
+"Net this month": "Netto denne måned",
+"Balance now": "Saldo nu",
+"Balance": "Saldo",
+"Cancelled": "Annulleret",
+"Show more": "Vis flere",
+"Orders from before the history started are shown as added. Cancelled orders only show from when the history started.": "Ordrer fra før historikken startede vises som tilføjet. Annullerede ordrer vises kun fra det tidspunkt, historikken startede.",
 "Big update": "Stor opdatering",
 "More tools": "Flere værktøjer"
 };
@@ -2726,13 +2837,13 @@ const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;"
 const lsGet=(k,def)=>{try{const v=localStorage.getItem(k);return v===null?def:v;}catch(e){return def;}};
 const lsSet=(k,v)=>{try{localStorage.setItem(k,v);}catch(e){}};
 const SHOP=qs(".brand span").textContent;
-const VERSION="2026-10-26b";
+const VERSION="2026-10-27";
 
 // ---------- language ----------
 let LANG=lsGet("lang","")||((navigator.language||"").toLowerCase().startsWith("da")?"da":"en");
 const t=s=>(LANG==="da"&&Object.prototype.hasOwnProperty.call(DA,s))?DA[s]:s;
 const LOC=()=>LANG==="da"?"da-DK":"en-GB";
-const DAPL={order:["ordre","ordrer"],key:["key","keys"],offer:["tilbud","tilbud"],unit:["enhed","enheder"],review:["anmeldelse","anmeldelser"],device:["enhed","enheder"],day:["dag","dage"]};
+const DAPL={order:["ordre","ordrer"],key:["key","keys"],offer:["tilbud","tilbud"],unit:["enhed","enheder"],review:["anmeldelse","anmeldelser"],device:["enhed","enheder"],day:["dag","dage"],event:["hændelse","hændelser"]};
 const plural=(n,w)=>LANG==="da"?n+" "+(DAPL[w]||[w,w+"s"])[n===1?0:1]:n+" "+w+(n===1?"":"s");
 const fmt=(n,d=2)=>Number(n).toLocaleString(LOC(),{minimumFractionDigits:d,maximumFractionDigits:d});
 const tm=iso=>new Date(iso).toLocaleTimeString(LOC(),{hour:"2-digit",minute:"2-digit"});
@@ -2822,9 +2933,9 @@ function copyText(text,btn){
 }
 
 // ---------- pages ----------
-const PAGES=["overview","sales","orders","stock","reviews","keys","warroom","mindmap","profit","users","settings","news"];
+const PAGES=["overview","sales","history","orders","stock","reviews","keys","warroom","mindmap","profit","users","settings","news"];
 const ADMIN_PAGES=["warroom","mindmap","profit","users"];
-const TITLES={overview:"Overview",sales:"Sales",orders:"Orders",stock:"Stock",reviews:"Reviews",keys:"Keys",warroom:"War-Room",mindmap:"Mindmap",profit:"Profit",users:"Users",settings:"Settings",news:"What's new"};
+const TITLES={overview:"Overview",sales:"Sales",history:"History",orders:"Orders",stock:"Stock",reviews:"Reviews",keys:"Keys",warroom:"War-Room",mindmap:"Mindmap",profit:"Profit",users:"Users",settings:"Settings",news:"What's new"};
 const page=()=>{const h=(location.hash||"#overview").slice(1);return PAGES.includes(h)?h:"overview";};
 const seen={};
 function once(name,key,fn){const k=JSON.stringify(key)+"|"+Math.floor(Date.now()/60000);if(seen[name]===k)return;seen[name]=k;fn();}
@@ -3290,6 +3401,39 @@ document.addEventListener("click",async e=>{const b=e.target.closest("[data-devo
  const r=await post("/api/devices/"+encodeURIComponent(b.dataset.devout),null,"DELETE");const j=await r.json().catch(()=>({}));
  if(j.me){location="/login";return;}loadDevices();});
 
+// ================= history =================
+let HF="all",HN=100,HLAST=null;
+async function loadHistory(){
+ try{const r=await fetch("/api/history?filter="+HF+"&limit="+HN);if(!r.ok)return;HLAST=await r.json();histRender();}catch(e){$("hlist").innerHTML=`<div class="empty">${t("Could not load.")}</div>`;}
+}
+function histRender(){
+ const j=HLAST;if(!j)return;const c=j.currency;
+ const tile=(l,v,sub,cls)=>`<div class="tile"><div class="l">${l}</div><div class="v ${cls||""}">${v}</div><div class="s">${sub}</div></div>`;
+ const sg=(v,s)=>(Math.abs(v)<0.005?"":s>0?"+":"−")+fmt(mv(Math.abs(v)));
+ $("htiles").innerHTML=
+  tile(t("Added today"),sg(j.added_today,1)+" <small>"+esc(shownCur())+"</small>",plural(j.n_added_today,"order"))
+  +tile(t("Removed today"),sg(j.removed_today,-1)+" <small>"+esc(shownCur())+"</small>",plural(j.n_removed_today,"order"),j.removed_today?"bad":"")
+  +tile(t("Net this month"),sg(j.added_month-j.removed_month,j.added_month-j.removed_month>=0?1:-1)+" <small>"+esc(shownCur())+"</small>",t("Added")+" "+fmt(mv(j.added_month))+" · "+t("Removed")+" "+fmt(mv(j.removed_month)))
+  +tile(t("Balance now"),fmt(mv(j.balance))+" <small>"+esc(shownCur())+"</small>",feeNote());
+ const ev=j.events;
+ $("hnote").textContent=j.total?plural(j.total,"event"):"";
+ if(!ev.length){$("hlist").innerHTML=`<div class="empty">${t("Nothing yet.")}</div>`;$("hmore").hidden=true;return;}
+ let html="",day="",rows=[];
+ const flush=()=>{if(!rows.length)return;html+=rows.join("");rows=[];};
+ const sums={};
+ ev.forEach(e=>{const k=new Date(e.t).toDateString();if(e.currency===c)sums[k]=(sums[k]||0)+(e.k==="add"?1:-1)*(GROSS?e.gross:e.net);});
+ ev.forEach(e=>{
+  const k=new Date(e.t).toDateString();
+  if(k!==day){flush();day=k;const s=sums[k]||0;html+=`<div class="hday"><div>${esc(dayLabel(e.t))}</div><span>${s>=0?"+":"−"}${fmt(mv(Math.abs(s)))} ${esc(shownCur())}</span></div>`;}
+  const add=e.k==="add",amt=GROSS?e.gross:e.net;
+  html+=`<div class="hrow"><div class="l"><div class="ic ${add?"":"rem"}">${add?"+":"−"}</div><div class="t">${esc(e.item||"?")}${add?"":` <span class="pill bad">${t("Cancelled")}</span>`}<small><button class="lnk" data-buyer="${esc(e.buyer)}">${esc(e.buyer||"?")}</button> · ${esc(tm(e.t))}${e.id?` · <button class="lnk" data-copy="${esc(e.id)}" title="${esc(t("Copy order ID"))}">${esc(e.id.slice(0,8))}</button>`:""}</small></div></div>
+   <div class="amt ${add?"add":"rem"}">${add?"+":"−"}${money(amt,e.currency)}${e.bal!=null?`<small>${t("Balance")} ${fmt(mv(e.bal))}</small>`:""}</div></div>`;
+ });
+ $("hlist").innerHTML=html;$("hmore").hidden=!j.more;
+}
+$("hseg").onclick=e=>{const b=e.target.closest("[data-h]");if(!b)return;HF=b.dataset.h;HN=100;qsa("#hseg button").forEach(x=>x.classList.toggle("on",x===b));loadHistory();};
+$("hmore").onclick=()=>{HN+=100;loadHistory();};
+
 // ================= settings =================
 function setTheme(th){document.documentElement.dataset.theme=th;lsSet("theme",th);
  const m=document.querySelector('meta[name=theme-color]');if(m)m.content=th==="light"?"#f4f5f8":"#0e1014";applyAccent();settingsUi();rerender();}
@@ -3369,7 +3513,11 @@ qsa("[data-n]").forEach(c=>{c.onchange=()=>{PREFS.notify[c.dataset.n]=c.checked;
 $("logout").onclick=async()=>{await post("/logout");location="/login";};
 
 // ================= what's new =================
-const NEWS=[{v:"2026-10-26 · 2",d:"2026-10-26",title:["More tools","Flere værktøjer"],items:[
+const NEWS=[{v:"2026-10-27",d:"2026-10-27",title:["History","Historik"],items:[
+ ["New History page: every time an order is added (+) or cancelled and taken off (−), with the amount and the balance after it","Ny Historik-side: hver gang en ordre lægges til (+) eller annulleres og trækkes fra (−), med beløbet og saldoen efter"],
+ ["Filter on added or removed, see totals for today and this month","Filtrér på tilføjet eller fratrukket, se totaler for i dag og denne måned"],
+ ["Note: cancelled orders show from the moment the history started. Update order_alerts.py too","Bemærk: annullerede ordrer vises fra det tidspunkt, historikken startede. Opdatér også order_alerts.py"]]},
+{v:"2026-10-26 · 2",d:"2026-10-26",title:["More tools","Flere værktøjer"],items:[
  ["Tax pot under the quote: how much we have avoided paying, in kroner (the percent is set in Settings and starts at 37% of profit)","Skattepotte under citatet: hvor meget vi har sluppet for at betale, i kroner (procenten sættes i Indstillinger og starter på 37% af profit)"],
  ["Stock forecast: how many days the keys last at the current pace","Lagerprognose: hvor mange dage keysene rækker ved nuværende tempo"],
  ["Eldorado connection status on the overview","Status for forbindelsen til Eldorado på overblikket"],
@@ -3424,11 +3572,12 @@ function translateStatic(){
 
 // ================= page switching, loading =================
 function setTitle(){const p=page();$("title").textContent=t(TITLES[p]);document.title=t(TITLES[p])+" · "+SHOP;}
-const TT={orders:0,profit:0,users:0,dev:0};
+const TT={orders:0,profit:0,users:0,dev:0,hist:0};
 function pageLoad(force){
  const p=page(),now=Date.now();
  if(p==="orders"&&(force||now-TT.orders>4500)){TT.orders=now;loadOrders();}
  if(p==="profit"&&isAdmin&&(force||now-TT.profit>15000)){TT.profit=now;loadProfit();}
+ if(p==="history"&&(force||now-TT.hist>6000)){TT.hist=now;loadHistory();}
  if(p==="users"&&isAdmin&&(force||now-TT.users>10000)){TT.users=now;users();loadDevices();}
  if(p==="settings"&&(force||now-TT.dev>15000)){TT.dev=now;loadDevices();}
  if(p==="settings")settingsUi();

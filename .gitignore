@@ -22,3 +22,4 @@ additional_info.txt
 __pycache__/
 seen_orders.json
 offer_dump.json
+history.json
