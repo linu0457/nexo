@@ -1,0 +1,22 @@
+# Gem denne fil som ".gitignore" (med punktum) i eldorado-mappen.
+# Alt herunder bliver paa VPS'en og kommer aldrig op paa GitHub.
+.env
+*.key
+vapid*
+ledger.json
+orders_db.json
+users.json
+devices.json
+prefs.json
+presence.json
+costs.json
+push_subs.json
+warroom.json
+mindmap.json
+refill_log.json
+*_state.json
+keys*.txt
+ignore_orders.txt
+additional_info.txt
+*.log
+__pycache__/
