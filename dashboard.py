@@ -3014,7 +3014,8 @@ function chart(d,boxId,count){
   const cx=L+iw/n*(i+.5),x0=cx-bw/2,h=Math.max(0,(x.v/top)*ih),last=i===n-1,r=Math.min(6,h/2);
   if(x.v>0){const yt=y(x.v);
    g+=`<path class="bar${last?" cur":""}" d="M${x0},${T+ih}L${x0},${yt+r}Q${x0},${yt} ${x0+r},${yt}L${x0+bw-r},${yt}Q${x0+bw},${yt} ${x0+bw},${yt+r}L${x0+bw},${T+ih}Z"/>`;
-   if(last||i===best)g+=`<text class="val" x="${cx}" y="${yt-7}" text-anchor="middle">${fmt(x.v,0)}</text>`;}
+   if(last||i===best){const lab=fmt(x.v,0)+" "+c,w=lab.length*7.4,edge=cx+w/2>W-R,left=cx-w/2<L-6;
+    g+=`<text class="val" x="${edge?W-R:left?L-6:cx}" y="${yt-7}" text-anchor="${edge?"end":left?"start":"middle"}">${esc(lab)}</text>`;}}
   g+=`<text class="tx" x="${cx}" y="${H-8}" text-anchor="middle">${esc(x.short)}</text>`;
   g+=`<rect class="hit" data-i="${i}" x="${cx-iw/n/2}" y="${T}" width="${iw/n}" height="${ih}" fill="transparent"/>`;
  });
