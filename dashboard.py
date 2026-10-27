@@ -1503,24 +1503,32 @@ def send_push(title, body, skip_user=None, skip_present=True, webpush_fn=None, k
     with _push_lock:
         subs = load_subs()
     admins = {u["name"] for u in load_users().values() if u["role"] == "admin"}
+    if not subs:
+        print(f"Push {kind}: nobody has turned notifications on yet", flush=True)
     for s in subs:
         skip = skip_user if isinstance(skip_user, (set, frozenset, list, tuple)) else {skip_user}
         if s["user"] in skip or s["user"] not in admins or (only_user and s["user"] != only_user):
             continue
-        if skip_dev and s["user"] == skip_dev[0] and (not s.get("cid") or s.get("cid") == skip_dev[1]):
-            continue  # the device the message was sent from
-        if skip_present and now - (_pres_c.get(s["cid"], 0) if s.get("cid") else _presence.get(s["user"], 0)) < 20:
-            continue  # that device has the page open, the page tells them itself
+        who = f"{s['user']}@{(s.get('cid') or 'old-device')[:6]}"
+        if skip_dev and s["user"] == skip_dev[0] and s.get("cid") and s.get("cid") == skip_dev[1]:
+            print(f"Push {kind}: skipped {who} (the device that sent it)", flush=True)
+            continue
+        if skip_present and s.get("cid") and now - _pres_c.get(s["cid"], 0) < 20:
+            print(f"Push {kind}: skipped {who} (page is open there)", flush=True)
+            continue
         pr = prefs_of(s["user"])
         if not pr["notify"].get(kind, True):
+            print(f"Push {kind}: skipped {who} ({kind} is switched off in Settings)", flush=True)
             continue
         lang = pr["lang"] or "da"
         payload = json.dumps({"title": str(_pick(title, lang)), "body": str(_pick(body, lang))[:140], "url": url, "tag": kind})
         try:
             webpush_fn(subscription_info=s["sub"], data=payload, vapid_private_key=str(VAPID_FILE),
                        vapid_claims={"sub": PUSH_CONTACT}, ttl=3600, timeout=10)
+            print(f"Push {kind}: sent to {who}", flush=True)
         except WebPushException as e:
             code = getattr(getattr(e, "response", None), "status_code", None)
+            print(f"Push {kind}: refused by {who} ({code or type(e).__name__})", flush=True)
             if code in (404, 410):
                 dead.append(s["sub"]["endpoint"])
             else:
