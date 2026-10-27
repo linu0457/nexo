@@ -1878,6 +1878,8 @@ class _Prog:
         self.restart_now = False
         self.wake = threading.Event()
         self.fake = False
+        self.cmd = None               # full command for non-python programs (Caddy)
+        self.cwd = None
 
 
 def _prog_add(p, text):
@@ -1887,9 +1889,22 @@ def _prog_add(p, text):
         p.last_out = time.time()
 
 
+def _caddy_find():
+    """Finds caddy.exe (HTTPS) and the folder with its Caddyfile. CADDY_DIR in .env points at it; otherwise next to or beside the dashboard."""
+    names = ("caddy.exe", "caddy")
+    dirs = [Path(os.getenv("CADDY_DIR"))] if os.getenv("CADDY_DIR") else []
+    dirs += [HERE, HERE / "caddy", HERE.parent / "caddy"]
+    for d in dirs:
+        for n in names:
+            exe = d / n
+            if exe.is_file() and (d / "Caddyfile").is_file():
+                return exe, d
+    return None, None
+
+
 def _prog_run(p):
     path = HERE / p.script
-    if not path.exists():
+    if p.cmd is None and not path.exists():
         p.state = "missing"
         _prog_add(p, f"{p.script} not found next to dashboard.py")
         return
@@ -1898,7 +1913,7 @@ def _prog_run(p):
     while not _prog_stop.is_set():
         began = time.time()
         try:
-            proc = subprocess.Popen([sys.executable, "-u", str(path), *p.args], cwd=str(HERE), env=env, stdout=subprocess.PIPE,
+            proc = subprocess.Popen(p.cmd or [sys.executable, "-u", str(path), *p.args], cwd=p.cwd or str(HERE), env=env, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
         except OSError as e:
             _prog_add(p, f"could not start: {e}")
@@ -1933,6 +1948,10 @@ def start_programs(only=None):
         if only and name not in only:
             continue
         p = _progs[name] = _Prog(name, script, args)
+    exe, cdir = _caddy_find()
+    if exe and (not only or "https" in only):
+        p = _progs["https"] = _Prog("https", exe.name, [])
+        p.cmd, p.cwd = [str(exe), "run"], str(cdir)
 
     def go():
         for p in list(_progs.values()):
