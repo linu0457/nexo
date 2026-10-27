@@ -20,7 +20,7 @@ import os
 import socket
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -148,7 +148,7 @@ def save_ledger(ledger):
     LEDGER_FILE.write_text(json.dumps(ledger))
 
 
-def log_event(kind, oid, entry):
+def log_event(kind, oid, entry, when=None, extra=None):
     """kind: "add" (new order counted) or "remove" (cancelled / refunded, taken off again).
     Kept in history.json so the dashboard can show when money came and went."""
     try:
@@ -156,10 +156,11 @@ def log_event(kind, oid, entry):
             events = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             events = []
-        events.append({"t": datetime.now(timezone.utc).isoformat(), "k": kind, "id": oid,
+        events.append({"t": when or datetime.now(timezone.utc).isoformat(), "k": kind, "id": oid,
                        "ots": entry.get("ts") or "", "amount": float(entry.get("amount") or 0),
                        "currency": entry.get("currency") or "USD", "buyer": entry.get("buyer") or "",
-                       "item": entry.get("item") or "", "qty": entry.get("qty") or 1})
+                       "item": entry.get("item") or "", "qty": entry.get("qty") or 1, **(extra or {})})
+        events.sort(key=lambda e: e["t"])
         tmp = HISTORY_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(events[-3000:], ensure_ascii=False), encoding="utf-8")
         tmp.replace(HISTORY_FILE)
@@ -319,6 +320,59 @@ def fetch_canceled_ids(client):
     return {o["id"] for o in data.get("results") or [] if o.get("id")}
 
 
+BACKFILL_MARK = Path("history_backfill.done")
+
+
+def cancel_time(o):
+    """When an order was cancelled, if Eldorado tells us. (None = not known)"""
+    for key in ("canceledDate", "cancelledDate", "canceledAt", "cancelledAt", "stateChangedDate", "lastUpdatedDate", "updatedDate", "modifiedDate"):
+        raw = o.get(key)
+        if raw:
+            try:
+                dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+            except ValueError:
+                pass
+    return None
+
+
+def backfill_cancelled(client, ledger):
+    """Once: puts your already cancelled orders (newest 50) into the history as added + removed,
+    so the history also shows what was taken off before the history started."""
+    if BACKFILL_MARK.exists():
+        return
+    try:
+        data = client.request("GET", "/api/v1/orders/me/seller/orders", params={
+            "displayFilter": "DisplaySellingOrders", "orderState": "Canceled",
+            "isAscendingDateOrder": "false", "pageSize": 50}) or {}
+        try:
+            known = {e.get("id") for e in json.loads(HISTORY_FILE.read_text(encoding="utf-8"))}
+        except (OSError, ValueError):
+            known = set()
+        floor = min((entry_date(e) for e in ledger.values()), default=None)
+        n = 0
+        for o in sorted(data.get("results") or [], key=order_time):
+            oid = o.get("id")
+            if not oid or oid in known or oid in ledger:
+                continue
+            if floor and local_date(order_time(o)) < floor:
+                continue      # before the totals started: it never counted, so nothing was taken off
+            tmp = {}
+            record(tmp, o)
+            e = tmp[oid]
+            ct = cancel_time(o)
+            est = ct is None or ct <= order_time(o)
+            t_add = order_time(o)
+            t_rem = (t_add + timedelta(seconds=1)) if est else ct
+            log_event("add", oid, e, when=t_add.astimezone(timezone.utc).isoformat(), extra={"old": True})
+            log_event("remove", oid, e, when=t_rem.astimezone(timezone.utc).isoformat(), extra={"old": True, "est": est})
+            n += 1
+        BACKFILL_MARK.write_text(datetime.now(timezone.utc).isoformat())
+        print(f"History: added {n} earlier cancelled order(s).", flush=True)
+    except Exception as e:     # try again next start
+        print(f"History backfill skipped: {type(e).__name__}", flush=True)
+
+
 def is_fresh(o):
     age = datetime.now(timezone.utc) - order_time(o)
     return age.total_seconds() <= ALERT_WINDOW_MINUTES * 60
@@ -397,6 +451,7 @@ def main():
     else:
         print(f"Started. {len(ledger)} orders in ledger.")
 
+    backfill_cancelled(client, ledger)
     print(f"Checking every {POLL_SECONDS} seconds. Stop with Ctrl+C.")
     delay = POLL_SECONDS
     while True:

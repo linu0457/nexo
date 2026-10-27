@@ -835,7 +835,7 @@ def history_view(kind, limit, offset):
             continue
         out.append({"id": r.get("id", ""), "t": r["t"], "k": r["k"], "net": net, "gross": round(float(r["amount"]), 2),
                     "currency": r["currency"], "buyer": r.get("buyer", ""), "item": r.get("item", ""), "qty": r.get("qty", 1),
-                    "old": bool(r.get("old")), "bal": bal})
+                    "old": bool(r.get("old")), "est": bool(r.get("est")), "bal": bal})
     tot = {k: round(v, 2) if isinstance(v, float) else v for k, v in tot.items()}
     page = out[offset:offset + limit]
     return {"events": page, "more": len(out) > offset + limit, "total": len(out), "currency": main, "balance": round(per.get(main, 0.0), 2), **tot}
@@ -3426,7 +3426,7 @@ function histRender(){
   const k=new Date(e.t).toDateString();
   if(k!==day){flush();day=k;const s=sums[k]||0;html+=`<div class="hday"><div>${esc(dayLabel(e.t))}</div><span>${s>=0?"+":"−"}${fmt(mv(Math.abs(s)))} ${esc(shownCur())}</span></div>`;}
   const add=e.k==="add",amt=GROSS?e.gross:e.net;
-  html+=`<div class="hrow"><div class="l"><div class="ic ${add?"":"rem"}">${add?"+":"−"}</div><div class="t">${esc(e.item||"?")}${add?"":` <span class="pill bad">${t("Cancelled")}</span>`}<small><button class="lnk" data-buyer="${esc(e.buyer)}">${esc(e.buyer||"?")}</button> · ${esc(tm(e.t))}${e.id?` · <button class="lnk" data-copy="${esc(e.id)}" title="${esc(t("Copy order ID"))}">${esc(e.id.slice(0,8))}</button>`:""}</small></div></div>
+  html+=`<div class="hrow"><div class="l"><div class="ic ${add?"":"rem"}">${add?"+":"−"}</div><div class="t">${esc(e.item||"?")}${add?"":` <span class="pill bad">${t("Cancelled")}</span>`}<small>${e.est?esc(t("time not tracked"))+" · ":""}<button class="lnk" data-buyer="${esc(e.buyer)}">${esc(e.buyer||"?")}</button> · ${esc(tm(e.t))}${e.id?` · <button class="lnk" data-copy="${esc(e.id)}" title="${esc(t("Copy order ID"))}">${esc(e.id.slice(0,8))}</button>`:""}</small></div></div>
    <div class="amt ${add?"add":"rem"}">${add?"+":"−"}${money(amt,e.currency)}${e.bal!=null?`<small>${t("Balance")} ${fmt(mv(e.bal))}</small>`:""}</div></div>`;
  });
  $("hlist").innerHTML=html;$("hmore").hidden=!j.more;
