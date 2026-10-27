@@ -78,7 +78,7 @@ OVERVIEW_TILES = ("today", "month", "all", "avg", "stock", "profit", "taxpot", "
 NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys", "warroom", "mindmap", "profit", "programs", "users", "settings", "news")
 BACKGROUNDS = ("", "dots", "grid", "waves", "aurora", "diagonal")
 DEFAULT_PREFS = {"lang": "", "accent": "", "currency": "", "sound": "ding", "gross": None, "tax": 37,
-                 "emoji": "", "color": "", "bg": "", "hide": [], "menu": [], "pins": [], "payout": 7,
+                 "emoji": "", "color": "", "bg": "", "hide": [], "menu": [], "pins": [], "payout": 5,
                  "notify": {"warroom": True, "orders": False, "reviews": True, "keys": True}}
 
 _mem = {}                      # demo mode keeps its small data files in memory only
@@ -2663,7 +2663,7 @@ body.hide .prog .pn small{filter:none}
   <div class="panel" style="margin-bottom:14px"><h2>Language</h2><div class="seg" id="langSeg"><button type="button" data-l="da">Dansk</button><button type="button" data-l="en">English</button></div></div>
   <div class="panel" style="margin-bottom:14px"><h2>Amounts</h2>
    <div class="field"><label>Show amounts in</label><div class="seg" id="curSeg"></div><div class="muted" id="curnote" style="font-size:12.5px"></div></div>
-   <div class="field"><label>Payout delay</label><div class="row" style="margin:0;align-items:center"><input type="number" id="payout" min="0" max="90" step="1" inputmode="numeric" style="width:100px"> <span>days</span></div><div class="muted" style="font-size:12.5px;margin-top:4px">How many days after an order you expect the money. Used for the expected payout date. 0 hides it.</div></div>
+   <div class="field"><label>Payout delay</label><div class="row" style="margin:0;align-items:center"><input type="number" id="payout" min="0" max="90" step="1" inputmode="numeric" style="width:100px"> <span>days</span></div><div class="muted" style="font-size:12.5px;margin-top:4px">How many days after the buyer has confirmed receipt you expect the money. Used for the expected payout date. 0 hides it.</div></div>
    <div class="field"><label>Fees</label><div class="seg" id="gnSeg2"><button type="button" data-g="0">Net (after fees)</button><button type="button" data-g="1">Gross (before fees)</button></div></div>
    <div class="tgl"><div>Hide all numbers<small>Blurs every amount. Good when someone looks over your shoulder. Only on this device.</small></div><input type="checkbox" id="setHide"></div>
   </div>
@@ -3091,7 +3091,7 @@ const DA={
 "Big update": "Stor opdatering",
 "Programs": "Programmer",
 "Payout delay": "Udbetalingsforsinkelse",
-"How many days after an order you expect the money. Used for the expected payout date. 0 hides it.": "Hvor mange dage efter en ordre du forventer pengene. Bruges til den forventede udbetalingsdato. 0 skjuler den.",
+"How many days after an order you expect the money. Used for the expected payout date. 0 hides it.": "Hvor mange dage efter køber har bekræftet modtagelse, du forventer pengene. Bruges til den forventede udbetalingsdato. 0 skjuler den.",
 "Menu": "Menu",
 "Drag a page, or use the arrows, to change the order. The star pins it to the top.": "Træk en side, eller brug pilene, for at ændre rækkefølgen. Stjernen fastgør den øverst.",
 "Reset menu": "Nulstil menu",
@@ -3108,6 +3108,7 @@ const DA={
 "payout around": "udbetaling ca.",
 "Expected payout": "Forventet udbetaling",
 "your own estimate": "dit eget estimat",
+"counted from when the buyer confirms receipt": "regnes fra køber bekræfter modtagelse",
 "No new news right now.": "Ingen nye nyheder lige nu.",
 "Earlier news": "Tidligere nyheder",
 "The change log shows when this folder is a Git clone (updated with opdater.bat).": "Ændringsloggen vises, når mappen er en Git-klon (opdateret med opdater.bat).",
@@ -3157,7 +3158,7 @@ const dayLabel2=key=>{const [y,m,d]=key.split("-").map(Number);return new Date(y
 const weekLabel=k=>t("Week")+" "+Number((k||"").split("W")[1]||0);
 
 // ---------- settings (kept on the server per user, mirrored in this browser) ----------
-let PREFS={lang:"",accent:"",currency:"",sound:"ding",gross:null,tax:37,emoji:"",color:"",bg:"",hide:[],menu:[],pins:[],payout:7,notify:{warroom:true,orders:false,reviews:true,keys:true}};
+let PREFS={lang:"",accent:"",currency:"",sound:"ding",gross:null,tax:37,emoji:"",color:"",bg:"",hide:[],menu:[],pins:[],payout:5,notify:{warroom:true,orders:false,reviews:true,keys:true}};
 const hid=k=>(PREFS.hide||[]).includes(k);
 const BGS=[["","None"],["dots","Dots"],["grid","Grid"],["waves","Waves"],["aurora","Aurora"],["diagonal","Diagonal"]];
 function applyBg(){document.body.dataset.bg=PREFS.bg||"";lsSet("bg",PREFS.bg||"");}
@@ -3173,7 +3174,7 @@ function applyServerPrefs(p){
   const local=k==="currency"?lsGet("cur",""):lsGet(k,"");
   if(p[k])PREFS[k]=p[k];else if(local&&k!=="lang"){PREFS[k]=local;push=true;}else PREFS[k]=k==="lang"?LANG:"";
  }
- PREFS.menu=p.menu||[];PREFS.pins=p.pins||[];PREFS.payout=p.payout==null?7:p.payout;PREFS.tax=p.tax==null?37:p.tax;PREFS.emoji=p.emoji||"";PREFS.color=p.color||"";PREFS.bg=p.bg||"";PREFS.hide=p.hide||[];
+ PREFS.menu=p.menu||[];PREFS.pins=p.pins||[];PREFS.payout=p.payout==null?5:p.payout;PREFS.tax=p.tax==null?37:p.tax;PREFS.emoji=p.emoji||"";PREFS.color=p.color||"";PREFS.bg=p.bg||"";PREFS.hide=p.hide||[];
  if(p.gross===null||p.gross===undefined){PREFS.gross=GROSS;push=true;}else{PREFS.gross=!!p.gross;GROSS=PREFS.gross;lsSet("gross",GROSS?"1":"0");}
  applyBg();
  if(!p.lang)push=true;
@@ -3344,7 +3345,8 @@ function latest(d){
  remember(d.orders);
  $("latest").innerHTML=d.orders.length?d.orders.slice(0,5).map(o=>`<div class="row2 click" data-oid="${esc(o.id)}" style="cursor:pointer"><div class="t">${esc(o.item)}<small>${esc(o.buyer)} · ${esc(ago(o.time))}</small></div><div class="e mono">${money(ordAmt(o),o.price.currency)}</div></div>`).join(""):`<div class="empty">${t("No orders yet.")}</div>`;
 }
-function payoutDate(o){return PREFS.payout>0?new Date(new Date(o.time).getTime()+PREFS.payout*864e5):null;}
+function recvTime(o){const l=o.log||{};return l.Received||(o.state==="Received"?o.time:null);}
+function payoutDate(o){const r=recvTime(o);return PREFS.payout>0&&r?new Date(new Date(r).getTime()+PREFS.payout*864e5):null;}
 function payoutTxt(o){const d=payoutDate(o);if(!d)return "";
  return " · "+(d.getTime()<Date.now()?t("payout due"):t("payout around")+" "+d.toLocaleDateString(LOC(),{day:"numeric",month:"short"}));}
 function pendHtml(d,limit){
@@ -3562,7 +3564,7 @@ function orderView(o){
   <div class="r1"><div>${t("Quantity")}</div><div class="v">${esc(o.quantity)}</div></div>
   <div class="r1"><div>${t("Buyer")}</div><div class="v"><button class="lnk" data-buyer="${esc(o.buyer)}">${esc(o.buyer)}</button> <button class="btn copy" data-copy="${esc(o.buyer)}">${t("Copy")}</button></div></div>
   <div class="r1"><div>${t("Placed")}</div><div class="v" style="font-weight:500">${esc(full(o.time))}</div></div>
-  ${payoutDate(o)?`<div class="r1"><div>${t("Expected payout")}<small>${t("your own estimate")}</small></div><div class="v" style="font-weight:500">${esc(payoutDate(o).toLocaleDateString(LOC(),{weekday:"short",day:"numeric",month:"short"}))}</div></div>`:""}
+  ${PREFS.payout>0?`<div class="r1"><div>${t("Expected payout")}<small>${payoutDate(o)?t("your own estimate"):t("counted from when the buyer confirms receipt")}</small></div><div class="v" style="font-weight:500">${payoutDate(o)?esc(payoutDate(o).toLocaleDateString(LOC(),{weekday:"short",day:"numeric",month:"short"})):"–"}</div></div>`:""}
   <div class="r1"><div>${t("Order ID")}<small style="overflow-wrap:anywhere;max-width:230px">${esc(o.id)}</small></div><div class="v"><button class="btn copy" data-copy="${esc(o.id)}">${t("Copy")}</button></div></div></div>`;
  if(idx!==undefined){
   const steps=[["Paid",t("Paid")],["Delivered",t("Delivered")],["Completed",t("Completed")]],log=o.log||{};
@@ -3772,7 +3774,7 @@ function settingsUi(){
   +`<input type="color" id="accpick" value="${/^#[0-9a-f]{6}$/i.test(acc)?acc:"#34d399"}" title="${esc(t("Pick any colour"))}" aria-label="${esc(t("Pick any colour"))}">`;
  $("accpick").oninput=e=>{PREFS.accent=e.target.value;syncLocal();applyAccent();};
  $("accpick").onchange=e=>setAccent(e.target.value);
- curUi();tglUi();menuUi();if(document.activeElement!==$("payout"))$("payout").value=PREFS.payout==null?7:PREFS.payout;
+ curUi();tglUi();menuUi();if(document.activeElement!==$("payout"))$("payout").value=PREFS.payout==null?5:PREFS.payout;
  $("bgSeg").innerHTML=BGS.map(b=>`<button type="button" class="chip${(PREFS.bg||"")===b[0]?" on":""}" data-bg="${b[0]}">${esc(t(b[1]))}</button>`).join("");
  const defs=[["today","Today"],["month","This month"],["all","All time"],["avg","Average order"],["stock","In stock"],["profit","Profit this month",1],["taxpot","Tax pot",1],["lastorder","Latest order"],["revrate","Reviews per order"],["chart","Sales per month"],["latest","Latest orders"],["pending","Waiting to be completed"],["reviews","Reviews"],["keys","Keys left"]];
  $("tilesel").innerHTML=defs.filter(x=>!x[2]||isAdmin).map(x=>`<label class="tgl"><div>${esc(t(x[1]))}</div><input type="checkbox" data-tile="${x[0]}"${hid(x[0])?"":" checked"}></label>`).join("");
@@ -3832,7 +3834,7 @@ $("logout").onclick=async()=>{await post("/logout");location="/login";};
 const NEWS=[{v:"2026-10-27 · 2",d:"2026-10-27",title:["More tools","Flere værktøjer"],items:[
  ["Programs page: the dashboard now starts order alerts, reviews, stock, stats and offer itself, shows if each one runs, and lets you restart one or watch its log live","Programmer-side: dashboardet starter nu ordre-alarmer, anmeldelser, lager, statistik og offer selv, viser om hver kører, og lader dig genstarte en eller se dens log live"],
  ["Growth in percent against the same days of last month, on the overview, on Sales and per month","Vækst i procent mod de samme dage sidste måned, på overblikket, på Salg og pr. måned"],
- ["Expected payout date on orders that are waiting (set the number of days in Settings)","Forventet udbetalingsdato på ordrer, der venter (sæt antal dage i Indstillinger)"],
+ ["Expected payout date: 5 days after the buyer confirms receipt (change the number of days in Settings)","Forventet udbetalingsdato: 5 dage efter køber har bekræftet modtagelse (ret antal dage i Indstillinger)"],
  ["Tap any number or box for a short explanation","Tryk på et tal eller en boks for en kort forklaring"],
  ["Change the order of the menu and pin your favourite pages (Settings)","Skift rækkefølgen på menuen og fastgør dine favoritsider (Indstillinger)"],
  ["News archive, and the latest changes from GitHub on this page","Nyhedsarkiv og de seneste ændringer fra GitHub på denne side"],
@@ -3970,7 +3972,7 @@ $("menuedit").addEventListener("dragend",()=>{mdrag=null;qsa(".mrow").forEach(x=
 $("menuedit").addEventListener("drop",e=>{const r=e.target.closest(".mrow");if(!r||!mdrag)return;e.preventDefault();
  const o=menuOrder().filter(x=>x!==mdrag),to=o.indexOf(r.dataset.m);o.splice(to<0?o.length:to,0,mdrag);mdrag=null;menuSave(o,PREFS.pins||[]);});
 $("menureset").onclick=()=>menuSave([],[]);
-$("payout").onchange=e=>{let v=parseInt(e.target.value,10);if(!(v>=0))v=7;v=Math.min(90,v);PREFS.payout=v;e.target.value=v;savePrefs();rerender();};
+$("payout").onchange=e=>{let v=parseInt(e.target.value,10);if(!(v>=0))v=5;v=Math.min(90,v);PREFS.payout=v;e.target.value=v;savePrefs();rerender();};
 
 // ================= translate the fixed text on the page =================
 const ORIG=new WeakMap();
