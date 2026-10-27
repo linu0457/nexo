@@ -2503,7 +2503,7 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
 
 /* round 3 */
 .gr{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;white-space:nowrap}.gr.up{background:var(--accentbg);color:var(--accent)}.gr.down{background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)}
-[data-help]{cursor:help}.tile[data-help] .l:after{content:"\24D8";font-size:11px;color:var(--muted);opacity:.7;margin-left:2px}
+[data-help]{cursor:pointer}.tile[data-help] .l:after{content:"\24D8";font-size:11px;color:var(--muted);opacity:.7;margin-left:2px}
 .helpb{position:fixed;z-index:120;max-width:min(320px,calc(100vw - 24px));background:var(--ink);color:var(--bg);border-radius:12px;padding:10px 13px;font-size:13px;line-height:1.45;box-shadow:0 12px 36px rgba(0,0,0,.4)}.helpb[hidden]{display:none}
 .prog{border-bottom:1px solid var(--line);padding:12px 0}.prog:last-child{border-bottom:0}
 .prog .ph{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.prog .pn{flex:1 1 200px;min-width:0}.prog .pn small{display:block;color:var(--muted);font-size:12.5px}
