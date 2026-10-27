@@ -75,9 +75,10 @@ CURRENCIES = ("DKK", "USD", "EUR")
 SOUNDS = ("ding", "bell", "pop", "chime", "none")
 NOTIFY_KINDS = ("warroom", "orders", "reviews", "keys")
 OVERVIEW_TILES = ("today", "month", "all", "avg", "stock", "profit", "taxpot", "lastorder", "revrate", "pending", "reviews", "keys", "latest", "chart")
+NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys", "warroom", "mindmap", "profit", "programs", "users", "settings", "news")
 BACKGROUNDS = ("", "dots", "grid", "waves", "aurora", "diagonal")
 DEFAULT_PREFS = {"lang": "", "accent": "", "currency": "", "sound": "ding", "gross": None, "tax": 37,
-                 "emoji": "", "color": "", "bg": "", "hide": [],
+                 "emoji": "", "color": "", "bg": "", "hide": [], "menu": [], "pins": [], "payout": 7,
                  "notify": {"warroom": True, "orders": False, "reviews": True, "keys": True}}
 
 _mem = {}                      # demo mode keeps its small data files in memory only
@@ -320,6 +321,11 @@ def prefs_of(name):
             out[k] = p[k]
     if p.get("bg") in BACKGROUNDS:
         out["bg"] = p["bg"]
+    for k in ("menu", "pins"):
+        if isinstance(p.get(k), list):
+            out[k] = [x for i, x in enumerate(p[k]) if x in NAV_PAGES and x not in p[k][:i]]
+    if isinstance(p.get("payout"), (int, float)) and not isinstance(p.get("payout"), bool) and 0 <= p["payout"] <= 90:
+        out["payout"] = int(p["payout"])
     if isinstance(p.get("hide"), list):
         out["hide"] = [x for x in p["hide"] if x in OVERVIEW_TILES]
     return out
@@ -1275,6 +1281,11 @@ def api_prefs():
             p["color"] = j["color"]
         if j.get("bg") in BACKGROUNDS:
             p["bg"] = j["bg"]
+        for k in ("menu", "pins"):
+            if isinstance(j.get(k), list):
+                p[k] = [x for i, x in enumerate(j[k]) if x in NAV_PAGES and x not in j[k][:i]]
+        if isinstance(j.get("payout"), (int, float)) and not isinstance(j.get("payout"), bool) and 0 <= j["payout"] <= 90:
+            p["payout"] = int(j["payout"])
         if isinstance(j.get("hide"), list):
             p["hide"] = [x for x in j["hide"] if x in OVERVIEW_TILES]
         if isinstance(j.get("notify"), dict):
@@ -1834,6 +1845,228 @@ def api_mind_link():
         return jsonify(ok=True, rev=_mm["rev"])
 
 
+# ======================= programs: the dashboard starts and watches the other scripts =======================
+
+import atexit
+import collections
+import subprocess
+
+HERE = Path(__file__).resolve().parent
+PROGRAM_LIST = [("orders", "order_alerts.py", []), ("reviews", "review_alerts.py", []), ("stock", "stock_board.py", []),
+                ("stats", "stats_board.py", []), ("offer", "offer.py", ["auto"])]
+_progs = {}                       # name -> _Prog (only when the dashboard manages the programs)
+_prog_stop = threading.Event()
+_prog_lock = threading.Lock()
+_prog_managed = False
+
+
+class _Prog:
+    def __init__(self, name, script, args):
+        self.name, self.script, self.args = name, script, list(args)
+        self.proc = None
+        self.lines = collections.deque(maxlen=800)
+        self.seq = 0
+        self.started = None
+        self.last_out = None
+        self.restarts = 0
+        self.code = None
+        self.state = "starting"
+        self.restart_now = False
+        self.wake = threading.Event()
+        self.fake = False
+
+
+def _prog_add(p, text):
+    with _prog_lock:
+        p.seq += 1
+        p.lines.append((p.seq, time.time(), text))
+        p.last_out = time.time()
+
+
+def _prog_run(p):
+    path = HERE / p.script
+    if not path.exists():
+        p.state = "missing"
+        _prog_add(p, f"{p.script} not found next to dashboard.py")
+        return
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    fast = 0
+    while not _prog_stop.is_set():
+        began = time.time()
+        try:
+            proc = subprocess.Popen([sys.executable, "-u", str(path), *p.args], cwd=str(HERE), env=env, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+        except OSError as e:
+            _prog_add(p, f"could not start: {e}")
+            p.state = "crashed"
+            _prog_stop.wait(30)
+            continue
+        p.proc, p.started, p.code, p.state = proc, time.time(), None, "running"
+        _prog_add(p, "started")
+        for line in proc.stdout:
+            text = line.rstrip()
+            _prog_add(p, text)
+            print(f"[{p.name:<8}] {text}", flush=True)
+        code = proc.wait()
+        p.code, p.proc = code, None
+        if _prog_stop.is_set():
+            break
+        manual, p.restart_now = p.restart_now, False
+        fast = 0 if manual else (fast + 1 if time.time() - began < 30 else 0)
+        wait = 1 if manual else min(5 * 2 ** min(fast, 5), 120)
+        p.restarts += 1
+        p.state = "restarting" if manual else "crashed"
+        _prog_add(p, f"stopped (code {code}), starting again in {wait}s")
+        p.wake.wait(wait)
+        p.wake.clear()
+
+
+def start_programs(only=None):
+    """Starts the other scripts as child programs, so  py dashboard.py  is the only thing you run."""
+    global _prog_managed
+    _prog_managed = True
+    for name, script, args in PROGRAM_LIST:
+        if only and name not in only:
+            continue
+        p = _progs[name] = _Prog(name, script, args)
+
+    def go():
+        for p in list(_progs.values()):
+            threading.Thread(target=_prog_run, args=(p,), daemon=True).start()
+            time.sleep(2)
+    threading.Thread(target=go, daemon=True).start()
+    atexit.register(stop_programs)
+
+
+def stop_programs():
+    _prog_stop.set()
+    for p in list(_progs.values()):
+        pr = p.proc
+        if pr is not None and pr.poll() is None:
+            try:
+                pr.terminate()
+            except OSError:
+                pass
+    end = time.time() + 6
+    for p in list(_progs.values()):
+        pr = p.proc
+        if pr is not None:
+            try:
+                pr.wait(max(0.1, end - time.time()))
+            except Exception:
+                try:
+                    pr.kill()
+                except OSError:
+                    pass
+
+
+def _demo_programs():
+    if _progs:
+        return
+    now = time.time()
+    for i, (name, script, args) in enumerate(PROGRAM_LIST):
+        p = _progs[name] = _Prog(name, script, args)
+        p.fake, p.state, p.started, p.restarts = True, "running", now - 3600 * (5 + i), (2 if name == "stock" else 0)
+        for k, text in enumerate([f"Started. Checking every 60 seconds.", "No new orders.", "No new orders.", "Checked, nothing changed."]):
+            p.seq += 1
+            p.lines.append((p.seq, now - 600 + k * 120, text))
+        p.last_out = now - (40 + i * 70)
+    _progs["reviews"].lines.append((99, now - 20, "1 new review (Positive)"))
+    _progs["reviews"].last_out = now - 20
+
+
+@app.route("/api/programs")
+def api_programs():
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    if DEMO:
+        _demo_programs()
+    now = time.time()
+    rows = []
+    for p in _progs.values():
+        pr = p.proc
+        running = p.fake and p.state == "running" or (pr is not None and pr.poll() is None)
+        rows.append({"name": p.name, "script": p.script, "running": bool(running), "state": p.state if not running else "running",
+                     "pid": None if p.fake else (pr.pid if pr is not None else None),
+                     "uptime": int(now - p.started) if running and p.started else 0,
+                     "quiet": int(now - p.last_out) if p.last_out else None, "restarts": p.restarts, "code": p.code})
+    return jsonify(managed=bool(_progs), programs=rows)
+
+
+@app.route("/api/programs/<name>/restart", methods=["POST"])
+def api_program_restart(name):
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    p = _progs.get(name)
+    if not p:
+        return jsonify(error="Unknown program."), 404
+    print(f"{current_user()['name']} restarted {name}.", flush=True)
+    if p.fake:
+        p.started, p.state = time.time(), "running"
+        _prog_add(p, "restarted")
+        return jsonify(ok=True)
+    p.restart_now = True
+    _prog_add(p, "restart requested")
+    pr = p.proc
+    if pr is not None and pr.poll() is None:
+        try:
+            pr.terminate()
+        except OSError:
+            pass
+    else:
+        p.wake.set()
+    return jsonify(ok=True)
+
+
+@app.route("/api/programs/<name>/log")
+def api_program_log(name):
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    p = _progs.get(name)
+    if not p:
+        return jsonify(error="Unknown program."), 404
+    try:
+        after = int(request.args.get("after", "0"))
+    except ValueError:
+        after = 0
+    with _prog_lock:
+        rows = [{"n": n, "t": datetime.fromtimestamp(ts, timezone.utc).isoformat(), "x": x[:400]} for n, ts, x in p.lines if n > after]
+    return jsonify(lines=rows[-300:], last=p.seq)
+
+
+# ---------- change log (from the git history of this folder) ----------
+
+_chlog = {"at": 0, "rows": [], "head": ""}
+
+
+@app.route("/api/changelog")
+def api_changelog():
+    bad = api_guard()
+    if bad:
+        return bad
+    if DEMO:
+        now = datetime.now(timezone.utc)
+        return jsonify(head="a1b2c3d", rows=[{"date": (now - timedelta(days=i)).isoformat(), "text": t} for i, t in enumerate(
+            ["Chart title follows net/gross", "Calendar: show currency next to day amounts", "History: backfill earlier cancelled orders once", "Add History page"])])
+    if time.time() - _chlog["at"] > 60:
+        rows, head = [], ""
+        try:
+            out = subprocess.run(["git", "log", "-n", "60", "--pretty=format:%cI%x09%s"], cwd=str(HERE), capture_output=True, text=True,
+                                 timeout=6, encoding="utf-8", errors="replace").stdout
+            for line in out.splitlines():
+                d, _, s = line.partition("\t")
+                if s and not s.startswith("Merge"):
+                    rows.append({"date": d, "text": s[:160]})
+            head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(HERE), capture_output=True, text=True, timeout=4).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        _chlog.update(at=time.time(), rows=rows, head=head)
+    return jsonify(rows=_chlog["rows"], head=_chlog["head"])
+
+
 # ---------- app (PWA): manifest, icons, service worker ----------
 
 
@@ -2267,6 +2500,22 @@ body[data-bg=diagonal]{background-image:repeating-linear-gradient(45deg,transpar
 .chips.wrap{flex-wrap:wrap}
 body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px);user-select:none}
 @media(max-width:820px){.calc{top:12px;right:16px;left:16px;width:auto}}
+
+/* round 3 */
+.gr{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;white-space:nowrap}.gr.up{background:var(--accentbg);color:var(--accent)}.gr.down{background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)}
+[data-help]{cursor:help}.tile[data-help] .l:after{content:"\24D8";font-size:11px;color:var(--muted);opacity:.7;margin-left:2px}
+.helpb{position:fixed;z-index:120;max-width:min(320px,calc(100vw - 24px));background:var(--ink);color:var(--bg);border-radius:12px;padding:10px 13px;font-size:13px;line-height:1.45;box-shadow:0 12px 36px rgba(0,0,0,.4)}.helpb[hidden]{display:none}
+.prog{border-bottom:1px solid var(--line);padding:12px 0}.prog:last-child{border-bottom:0}
+.prog .ph{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.prog .pn{flex:1 1 200px;min-width:0}.prog .pn small{display:block;color:var(--muted);font-size:12.5px}
+.pdot{width:10px;height:10px;border-radius:99px;background:var(--muted);flex:none}.pdot.ok{background:var(--accent);box-shadow:0 0 0 4px var(--accentbg)}.pdot.bad{background:var(--red)}.pdot.warn{background:var(--amber)}
+.plog{margin:10px 0 0;max-height:300px;overflow:auto;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+.plog .e{color:var(--red)}.plog .tt{color:var(--muted)}
+.chrow{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)}.chrow:last-child{border-bottom:0}.chrow time{flex:none;width:92px;color:var(--muted);font-size:12.5px}
+.mrow{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;margin-bottom:6px;background:var(--panel2);cursor:grab}.mrow.drag{opacity:.4}.mrow.over{border-color:var(--accent)}
+.mrow .nm{flex:1;min-width:0}.mrow button{border:0;background:none;color:var(--ink2);font-size:15px;padding:4px 7px;cursor:pointer;border-radius:8px}.mrow button:hover{background:var(--panel)}.mrow button.on{color:var(--amber)}
+#nav a.pinned:after{content:"\2605";margin-left:auto;font-size:10px;color:var(--amber)}
+@media(max-width:820px){#nav a.pinned:after{display:none}}
+body.hide .prog .pn small{filter:none}
 </style></head><body><div class="app">
 <main>
 <div class="quote" id="quote" hidden></div>
@@ -2299,23 +2548,23 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
   <div class="panel"><h2>Waiting to be completed <a href="#orders">Open</a></h2><div class="dyn" id="pend"><div class="sk line"></div><div class="sk line"></div></div></div>
   <div class="grid3 dyn" id="mini" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"><div class="sk tile"></div><div class="sk tile"></div></div>
  </div>
- <div class="panel" style="margin-top:14px"><h2>Eldorado connection <span id="statsum"></span></h2><div class="dyn" id="statbox"><div class="sk line"></div><div class="sk line"></div></div></div>
+ <div class="panel" data-help="status" style="margin-top:14px"><h2>Eldorado connection <span id="statsum"></span></h2><div class="dyn" id="statbox"><div class="sk line"></div><div class="sk line"></div></div></div>
 </section>
 
 <section class="page" id="p-sales">
  <div class="tiles dyn" id="stiles"><div class="sk tile"></div><div class="sk tile"></div><div class="sk tile"></div></div>
  <div class="grid">
   <div class="panel"><h2><b id="mt2">Sales per month</b> <span id="cur2"></span></h2><div class="chart dyn" id="chart2"><div class="sk box"></div></div></div>
-  <div class="panel"><h2>Records</h2><div class="rows dyn" id="recs"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div></div>
+  <div class="panel" data-help="records"><h2>Records</h2><div class="rows dyn" id="recs"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div></div>
  </div>
  <div class="grid">
-  <div class="panel"><div class="calhead"><button class="btn icon" id="calprev" aria-label="Previous month"><svg class="i" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button><div style="text-align:center"><b id="calttl"></b><div class="muted" id="calsum" style="font-size:12.5px"></div></div><button class="btn icon" id="calnext" aria-label="Next month"><svg class="i" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button></div>
+  <div class="panel" data-help="calendar"><div class="calhead"><button class="btn icon" id="calprev" aria-label="Previous month"><svg class="i" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button><div style="text-align:center"><b id="calttl"></b><div class="muted" id="calsum" style="font-size:12.5px"></div></div><button class="btn icon" id="calnext" aria-label="Next month"><svg class="i" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button></div>
    <div class="cal dyn" id="cal"></div></div>
   <div class="panel"><h2>Day <span id="daydate"></span></h2><div class="dyn" id="dayd"><div class="empty">Pick a day in the calendar.</div></div></div>
  </div>
  <div class="grid">
-  <div class="panel"><h2>Eldorado fees</h2><div class="rows dyn" id="fees"></div></div>
-  <div class="panel"><h2>Monthly breakdown</h2><div class="scroll dyn" id="months"></div></div>
+  <div class="panel" data-help="fees"><h2>Eldorado fees</h2><div class="rows dyn" id="fees"></div></div>
+  <div class="panel" data-help="months"><h2>Monthly breakdown</h2><div class="scroll dyn" id="months"></div></div>
  </div>
 </section>
 
@@ -2326,6 +2575,10 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
   <div class="row" style="margin-top:12px"><button class="btn" id="hmore" type="button" hidden>Show more</button></div>
   <div class="muted" style="font-size:12.5px;margin-top:10px">Orders from before the history started are shown as added. Cancelled orders only show from when the history started.</div></div>
 </section>
+
+<section class="page" id="p-programs"><div class="panel"><h2>Programs <span id="progsum"></span></h2>
+ <div class="dyn" id="proglist"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div>
+ <div class="muted" style="font-size:12.5px;margin-top:10px">The dashboard starts these programs and starts them again if they stop. Restart one if it seems stuck.</div></div></section>
 
 <section class="page" id="p-orders">
  <div class="panel" style="margin-bottom:14px"><h2>Waiting to be completed <span id="pendsum"></span></h2><div class="dyn" id="opend"></div></div>
@@ -2410,6 +2663,7 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
   <div class="panel" style="margin-bottom:14px"><h2>Language</h2><div class="seg" id="langSeg"><button type="button" data-l="da">Dansk</button><button type="button" data-l="en">English</button></div></div>
   <div class="panel" style="margin-bottom:14px"><h2>Amounts</h2>
    <div class="field"><label>Show amounts in</label><div class="seg" id="curSeg"></div><div class="muted" id="curnote" style="font-size:12.5px"></div></div>
+   <div class="field"><label>Payout delay</label><div class="row" style="margin:0;align-items:center"><input type="number" id="payout" min="0" max="90" step="1" inputmode="numeric" style="width:100px"> <span>days</span></div><div class="muted" style="font-size:12.5px;margin-top:4px">How many days after an order you expect the money. Used for the expected payout date. 0 hides it.</div></div>
    <div class="field"><label>Fees</label><div class="seg" id="gnSeg2"><button type="button" data-g="0">Net (after fees)</button><button type="button" data-g="1">Gross (before fees)</button></div></div>
    <div class="tgl"><div>Hide all numbers<small>Blurs every amount. Good when someone looks over your shoulder. Only on this device.</small></div><input type="checkbox" id="setHide"></div>
   </div>
@@ -2418,6 +2672,8 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
    <div class="field"><label>Background</label><div class="chips" id="bgSeg"></div></div>
    <div class="field" style="margin-bottom:0"><label>Light or dark</label><div class="seg" id="thSeg"><button type="button" data-t="dark">Dark</button><button type="button" data-t="light">Light</button></div></div>
   </div>
+  <div class="panel" style="margin-top:14px"><h2>Menu</h2><div class="muted" style="font-size:12.5px;margin-bottom:8px">Drag a page, or use the arrows, to change the order. The star pins it to the top.</div><div id="menuedit" class="dyn"></div>
+   <div class="row" style="margin-top:10px"><button class="btn" id="menureset" type="button">Reset menu</button><a class="btn" href="#news">All news and changes</a></div></div>
   <div class="panel" style="margin-top:14px"><h2>Overview</h2><div class="muted" style="font-size:12.5px;margin-bottom:6px">Choose what is shown on the overview.</div><div id="tilesel"></div></div>
  </div>
  <div>
@@ -2444,8 +2700,10 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
  </div>
 </div></section>
 
-<section class="page" id="p-news"><div class="panel"><h2>What's new in the dashboard</h2><div id="newsbox"></div></div></section>
+<section class="page" id="p-news"><div class="panel"><h2>What's new in the dashboard</h2><div id="newsbox"></div></div>
+ <div class="panel" style="margin-top:14px"><h2>Changes from GitHub <span id="chhead"></span></h2><div class="dyn" id="chlog"></div></div></section>
 </main>
+<div class="helpb" id="help" hidden role="tooltip"></div>
 
 <aside>
  <div class="brand"><div class="logo" id="logo">N</div><span>__SHOP__</span></div>
@@ -2460,6 +2718,7 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
   <a href="#warroom" data-p="warroom" id="navwar" hidden><svg class="i" viewBox="0 0 24 24"><path d="M21 12a8 8 0 01-11.6 7.1L4 20l1-4.6A8 8 0 1121 12z"/></svg>War-Room<span class="badge" id="wbadge" style="display:none"></span></a>
   <a href="#mindmap" data-p="mindmap" id="navmind" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5"/><circle cx="4.5" cy="5.5" r="2"/><circle cx="19.5" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M10 10.5L6 7M14 10.5l4-3M10.5 14l-3 3.5"/></svg>Mindmap</a>
   <a href="#profit" data-p="profit" id="navprofit" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5c0-1 1-1.5 2.5-1.5s2.5.6 2.5 1.7c0 2.3-5 1.3-5 3.6 0 1.1 1 1.7 2.5 1.7s2.5-.5 2.5-1.5"/></svg>Profit</a>
+  <a href="#programs" data-p="programs" id="navprog" hidden><svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 10l3 2-3 2M13 14h4"/></svg>Programs</a>
   <a href="#users" data-p="users" id="navusers" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-4 3-6 7-6s7 2 7 6M17 5a3.5 3.5 0 010 7M22 20c0-3-2-5-4-5.5"/></svg>Users</a>
   <a href="#settings" data-p="settings"><svg class="i" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>Settings</a>
   <a href="#news" data-p="news"><svg class="i" viewBox="0 0 24 24"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>What's new<span class="newdot" id="newdot" hidden></span></a>
@@ -2830,6 +3089,44 @@ const DA={
 "Gross per month": "Brutto pr. måned",
 "Net per month": "Netto pr. måned",
 "Big update": "Stor opdatering",
+"Programs": "Programmer",
+"Payout delay": "Udbetalingsforsinkelse",
+"How many days after an order you expect the money. Used for the expected payout date. 0 hides it.": "Hvor mange dage efter en ordre du forventer pengene. Bruges til den forventede udbetalingsdato. 0 skjuler den.",
+"Menu": "Menu",
+"Drag a page, or use the arrows, to change the order. The star pins it to the top.": "Træk en side, eller brug pilene, for at ændre rækkefølgen. Stjernen fastgør den øverst.",
+"Reset menu": "Nulstil menu",
+"All news and changes": "Alle nyheder og ændringer",
+"Changes from GitHub": "Ændringer fra GitHub",
+"The dashboard starts these programs and starts them again if they stop. Restart one if it seems stuck.": "Dashboardet starter disse programmer og starter dem igen, hvis de stopper. Genstart et, hvis det virker hængt.",
+"Growth": "Vækst",
+"Growth this month": "Vækst denne måned",
+"compared with the same days last month": "sammenlignet med de samme dage sidste måned",
+"against": "mod",
+"same days last month": "samme dage sidste måned",
+"Not enough history yet.": "Ikke nok historik endnu.",
+"payout due": "udbetaling forfalden",
+"payout around": "udbetaling ca.",
+"Expected payout": "Forventet udbetaling",
+"your own estimate": "dit eget estimat",
+"No new news right now.": "Ingen nye nyheder lige nu.",
+"Earlier news": "Tidligere nyheder",
+"The change log shows when this folder is a Git clone (updated with opdater.bat).": "Ændringsloggen vises, når mappen er en Git-klon (opdateret med opdater.bat).",
+"The dashboard is not starting the programs. Run it with  py dashboard.py  (without --no-programs).": "Dashboardet starter ikke programmerne. Kør det med  py dashboard.py  (uden --no-programs).",
+"stopped": "stoppet",
+"All running": "Alle kører",
+"Running for": "Kører i",
+"Restarting": "Genstarter",
+"File not found": "Filen findes ikke",
+"Stopped, starting again": "Stoppet, starter igen",
+"Stopped": "Stoppet",
+"last output": "sidste output",
+"restarted": "genstartet",
+"Hide log": "Skjul log",
+"Show log": "Vis log",
+"Restart": "Genstart",
+"Move up": "Flyt op",
+"Move down": "Flyt ned",
+"Pin": "Fastgør",
 "More tools": "Flere værktøjer"
 };
 
@@ -2839,13 +3136,13 @@ const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;"
 const lsGet=(k,def)=>{try{const v=localStorage.getItem(k);return v===null?def:v;}catch(e){return def;}};
 const lsSet=(k,v)=>{try{localStorage.setItem(k,v);}catch(e){}};
 const SHOP=qs(".brand span").textContent;
-const VERSION="2026-10-27";
+const VERSION="2026-10-27b";
 
 // ---------- language ----------
 let LANG=lsGet("lang","")||((navigator.language||"").toLowerCase().startsWith("da")?"da":"en");
 const t=s=>(LANG==="da"&&Object.prototype.hasOwnProperty.call(DA,s))?DA[s]:s;
 const LOC=()=>LANG==="da"?"da-DK":"en-GB";
-const DAPL={order:["ordre","ordrer"],key:["key","keys"],offer:["tilbud","tilbud"],unit:["enhed","enheder"],review:["anmeldelse","anmeldelser"],device:["enhed","enheder"],day:["dag","dage"],event:["hændelse","hændelser"]};
+const DAPL={order:["ordre","ordrer"],key:["key","keys"],offer:["tilbud","tilbud"],unit:["enhed","enheder"],review:["anmeldelse","anmeldelser"],device:["enhed","enheder"],day:["dag","dage"],event:["hændelse","hændelser"],program:["program","programmer"],time:["gang","gange"]};
 const plural=(n,w)=>LANG==="da"?n+" "+(DAPL[w]||[w,w+"s"])[n===1?0:1]:n+" "+w+(n===1?"":"s");
 const fmt=(n,d=2)=>Number(n).toLocaleString(LOC(),{minimumFractionDigits:d,maximumFractionDigits:d});
 const tm=iso=>new Date(iso).toLocaleTimeString(LOC(),{hour:"2-digit",minute:"2-digit"});
@@ -2860,7 +3157,7 @@ const dayLabel2=key=>{const [y,m,d]=key.split("-").map(Number);return new Date(y
 const weekLabel=k=>t("Week")+" "+Number((k||"").split("W")[1]||0);
 
 // ---------- settings (kept on the server per user, mirrored in this browser) ----------
-let PREFS={lang:"",accent:"",currency:"",sound:"ding",gross:null,tax:37,emoji:"",color:"",bg:"",hide:[],notify:{warroom:true,orders:false,reviews:true,keys:true}};
+let PREFS={lang:"",accent:"",currency:"",sound:"ding",gross:null,tax:37,emoji:"",color:"",bg:"",hide:[],menu:[],pins:[],payout:7,notify:{warroom:true,orders:false,reviews:true,keys:true}};
 const hid=k=>(PREFS.hide||[]).includes(k);
 const BGS=[["","None"],["dots","Dots"],["grid","Grid"],["waves","Waves"],["aurora","Aurora"],["diagonal","Diagonal"]];
 function applyBg(){document.body.dataset.bg=PREFS.bg||"";lsSet("bg",PREFS.bg||"");}
@@ -2876,7 +3173,7 @@ function applyServerPrefs(p){
   const local=k==="currency"?lsGet("cur",""):lsGet(k,"");
   if(p[k])PREFS[k]=p[k];else if(local&&k!=="lang"){PREFS[k]=local;push=true;}else PREFS[k]=k==="lang"?LANG:"";
  }
- PREFS.tax=p.tax==null?37:p.tax;PREFS.emoji=p.emoji||"";PREFS.color=p.color||"";PREFS.bg=p.bg||"";PREFS.hide=p.hide||[];
+ PREFS.menu=p.menu||[];PREFS.pins=p.pins||[];PREFS.payout=p.payout==null?7:p.payout;PREFS.tax=p.tax==null?37:p.tax;PREFS.emoji=p.emoji||"";PREFS.color=p.color||"";PREFS.bg=p.bg||"";PREFS.hide=p.hide||[];
  if(p.gross===null||p.gross===undefined){PREFS.gross=GROSS;push=true;}else{PREFS.gross=!!p.gross;GROSS=PREFS.gross;lsSet("gross",GROSS?"1":"0");}
  applyBg();
  if(!p.lang)push=true;
@@ -2935,9 +3232,9 @@ function copyText(text,btn){
 }
 
 // ---------- pages ----------
-const PAGES=["overview","sales","history","orders","stock","reviews","keys","warroom","mindmap","profit","users","settings","news"];
-const ADMIN_PAGES=["warroom","mindmap","profit","users"];
-const TITLES={overview:"Overview",sales:"Sales",history:"History",orders:"Orders",stock:"Stock",reviews:"Reviews",keys:"Keys",warroom:"War-Room",mindmap:"Mindmap",profit:"Profit",users:"Users",settings:"Settings",news:"What's new"};
+const PAGES=["overview","sales","history","orders","stock","reviews","keys","warroom","mindmap","profit","programs","users","settings","news"];
+const ADMIN_PAGES=["warroom","mindmap","profit","programs","users"];
+const TITLES={overview:"Overview",sales:"Sales",history:"History",programs:"Programs",orders:"Orders",stock:"Stock",reviews:"Reviews",keys:"Keys",warroom:"War-Room",mindmap:"Mindmap",profit:"Profit",users:"Users",settings:"Settings",news:"What's new"};
 const page=()=>{const h=(location.hash||"#overview").slice(1);return PAGES.includes(h)?h:"overview";};
 const seen={};
 function once(name,key,fn){const k=JSON.stringify(key)+"|"+Math.floor(Date.now()/60000);if(seen[name]===k)return;seen[name]=k;fn();}
@@ -2957,29 +3254,38 @@ function welcome(d){
  const r=s.records,badges=[r.day.record?t("Best day ever!"):"",r.week.record?t("Best week ever!"):"",r.month.record?t("Best month ever!"):""].filter(Boolean);
  $("welcome").innerHTML=`<div><b>${hi}, ${esc(d.user.name)}!</b><div class="w2">${parts.join(" · ")}</div></div><div class="mini2">${badges.map(b=>`<span class="rec">${b}</span>`).join("")}</div>`;
 }
+// growth: this month so far against the same days of last month (net or gross, like the rest of the page)
+function growthInfo(s){
+ const [y,m,dd]=s.date.split("-").map(Number),py=m===1?y-1:y,pm=m===1?12:m-1,key=(Y,M,D)=>Y+"-"+String(M).padStart(2,"0")+"-"+String(D).padStart(2,"0");
+ let cur=0,prev=0;
+ for(let i=1;i<=dd;i++){const a=s.days[key(y,m,i)],b=s.days[key(py,pm,i)];if(a)cur+=GROSS?a.g:a.a;if(b)prev+=GROSS?b.g:b.a;}
+ return prev>0?{pct:(cur/prev-1)*100,cur,prev}:null;
+}
+const grCls=p=>p>=0?"up":"down",grTxt=p=>(p>=0?"▲ +":"▼ −")+fmt(Math.abs(p),0)+"%";
+function growthBadge(s){const g=growthInfo(s);return g?`<span class="gr ${grCls(g.pct)}" title="${esc(t("compared with the same days last month"))}">${grTxt(g.pct)}</span>`:"";}
 function tiles(d){
  const s=d.sales,cur=esc(shownCur()),r=s.records;
- const tile0=(l,key,v,sub,extra)=>`<div class="tile"><div class="l">${l} ${extra||""}</div><div class="v">${cuHtml(key,mv(v))} <small>${cur}</small></div><div class="s">${sub}</div></div>`;
+ const tile0=(l,key,v,sub,extra)=>`<div class="tile" data-help="${key}"><div class="l">${l} ${extra||""}</div><div class="v">${cuHtml(key,mv(v))} <small>${cur}</small></div><div class="s">${sub}</div></div>`;
  const other=o=>s.fee_percent?` · ${GROSS?t("net"):t("gross")} ${fmt(mv(GROSS?o.amount:o.gross))}`:"";
  const avg=o=>o.orders?amtOf(o)/o.orders:0;
  const tile=(id,...a)=>hid(id)?"":tile0(...a);
  let h=tile("today",t("Today"),"t-today",amtOf(s.today),plural(s.today.orders,"order")+other(s.today),recBadge(r.day.record))
-  +tile("month",t("This month"),"t-month",amtOf(s.month),plural(s.month.orders,"order")+other(s.month),recBadge(r.month.record))
+  +tile("month",t("This month"),"t-month",amtOf(s.month),plural(s.month.orders,"order")+other(s.month),recBadge(r.month.record)+growthBadge(s))
   +tile("all",t("All time"),"t-all",amtOf(s.all),plural(s.all.orders,"order")+other(s.all))
   +tile("avg",t("Average order"),"t-avg",avg(s.all),t("Today")+": "+(s.today.orders?fmt(mv(avg(s.today))):"-")+" "+cur)
-  +(hid("stock")?"":`<div class="tile"><div class="l">${t("In stock")}</div><div class="v">${cuHtml("t-stock",d.stock.units,0)} <small>${t("units")}</small></div><div class="s">${plural(d.stock.offers.length,"offer")}</div></div>`);
+  +(hid("stock")?"":`<div class="tile" data-help="t-stock"><div class="l">${t("In stock")}</div><div class="v">${cuHtml("t-stock",d.stock.units,0)} <small>${t("units")}</small></div><div class="s">${plural(d.stock.offers.length,"offer")}</div></div>`);
  if(d.profit)h+=tile("profit",t("Profit this month"),"t-profit",d.profit.month,t("All time")+": "+fmt(mv(d.profit.all))+" "+cur);
  if(!hid("lastorder")){const lo=d.orders[0],mins=lo?(Date.now()-new Date(lo.time))/6e4:0,cls=!lo?"":mins>360?"bad":mins>120?"warn":"";
-  h+=`<div class="tile"><div class="l">${t("Latest order")}</div><div class="v ${cls}">${lo?esc(waited(lo.time)):"-"}${lo?` <small>${t("ago")}</small>`:""}</div><div class="s">${lo?esc(lo.buyer)+" · "+esc(tm(lo.time)):t("No orders yet.")}</div></div>`;}
+  h+=`<div class="tile" data-help="lastorder"><div class="l">${t("Latest order")}</div><div class="v ${cls}">${lo?esc(waited(lo.time)):"-"}${lo?` <small>${t("ago")}</small>`:""}</div><div class="s">${lo?esc(lo.buyer)+" · "+esc(tm(lo.time)):t("No orders yet.")}</div></div>`;}
  if(!hid("revrate")){const rv=d.reviews,tot=rv.positive+rv.negative,n=s.all.orders,pc=n?Math.min(100,tot*100/n):null;
-  h+=`<div class="tile"><div class="l">${t("Reviews per order")}</div><div class="v">${pc===null?"-":fmt(pc,0)} <small>%</small></div><div class="s">${plural(tot,"review")} ${t("of")} ${plural(n,"order")}</div></div>`;}
+  h+=`<div class="tile" data-help="revrate"><div class="l">${t("Reviews per order")}</div><div class="v">${pc===null?"-":fmt(pc,0)} <small>%</small></div><div class="s">${plural(tot,"review")} ${t("of")} ${plural(n,"order")}</div></div>`;}
  s.others.forEach(o=>{h+=`<div class="tile"><div class="l">${esc(o.currency)} (${t("all time")})</div><div class="v">${fmt(o.all.amount)} <small>${esc(o.currency)}</small></div><div class="s">${plural(o.all.orders,"order")}</div></div>`;});
  $("tiles").innerHTML=h;runCountUps($("tiles"));
 }
 function taxpot(d){
  const el=$("taxpot");if(!isAdmin||!d.profit||hid("taxpot")){el.hidden=true;return;}
  const pct=PREFS.tax==null?37:PREFS.tax,all=Math.max(0,d.profit.all_dkk)*pct/100,mo=Math.max(0,d.profit.month_dkk)*pct/100;
- el.hidden=false;
+ el.hidden=false;el.dataset.help="taxpot";
  el.innerHTML=`<span>${t("We have avoided paying")}:</span> <b>${fmt(all,0)} kr.</b><small>${fmt(pct,pct%1?1:0)}% ${t("of profit")} · ${t("this month")}: ${fmt(mo,0)} kr.${d.profit.dkk_live?"":" · "+t("rough rate")}</small>`;
 }
 function fcText(k){
@@ -3038,10 +3344,13 @@ function latest(d){
  remember(d.orders);
  $("latest").innerHTML=d.orders.length?d.orders.slice(0,5).map(o=>`<div class="row2 click" data-oid="${esc(o.id)}" style="cursor:pointer"><div class="t">${esc(o.item)}<small>${esc(o.buyer)} · ${esc(ago(o.time))}</small></div><div class="e mono">${money(ordAmt(o),o.price.currency)}</div></div>`).join(""):`<div class="empty">${t("No orders yet.")}</div>`;
 }
+function payoutDate(o){return PREFS.payout>0?new Date(new Date(o.time).getTime()+PREFS.payout*864e5):null;}
+function payoutTxt(o){const d=payoutDate(o);if(!d)return "";
+ return " · "+(d.getTime()<Date.now()?t("payout due"):t("payout around")+" "+d.toLocaleDateString(LOC(),{day:"numeric",month:"short"}));}
 function pendHtml(d,limit){
  const p=d.pending;remember(p.rows);
  if(!p.n)return `<div class="empty">${t("Nothing is waiting. All orders are completed.")}</div>`;
- return p.rows.slice(0,limit||8).map(o=>`<div class="row2" data-oid="${esc(o.id)}" style="cursor:pointer"><div class="t">${esc(o.item)}<small>${esc(o.buyer)} · ${t("waiting")} ${esc(waited(o.time))}</small></div><div class="e"><div class="mono">${money(ordAmt(o),o.price.currency)}</div><span class="pill ${stClass(o.state)}">${esc(stateName(o.state))}</span></div></div>`).join("")
+ return p.rows.slice(0,limit||8).map(o=>`<div class="row2" data-oid="${esc(o.id)}" style="cursor:pointer"><div class="t">${esc(o.item)}<small>${esc(o.buyer)} · ${t("waiting")} ${esc(waited(o.time))}${payoutTxt(o)}</small></div><div class="e"><div class="mono">${money(ordAmt(o),o.price.currency)}</div><span class="pill ${stClass(o.state)}">${esc(stateName(o.state))}</span></div></div>`).join("")
   +(p.n>(limit||8)?`<div class="muted" style="padding-top:8px">+ ${p.n-(limit||8)} ${t("more")}</div>`:"");
 }
 function pending(d){
@@ -3051,9 +3360,9 @@ function mini(d){
  const r=d.reviews,tot=r.positive+r.negative,pct=tot?Math.round(r.positive*100/tot):null,k=d.keys,low=k.left<=10;
  const lowStock=d.stock.offers.filter(o=>o.quantity<=5).length;
  $("mini").innerHTML=
-  (hid("reviews")?"":`<div class="panel"><h2>${t("Reviews")} <a href="#reviews">${t("Open")}</a></h2><div class="big">${pct===null?"-":pct+"%"}</div><div class="muted">${r.positive} ${t("good")} · ${r.negative} ${t("bad")}</div></div>`)
-  +(hid("keys")?"":`<div class="panel"><h2>${t("Keys left")} <a href="#keys">${t("Open")}</a></h2><div class="big">${fmt(k.left,0)}</div><div style="margin-top:4px">${low?`<span class="pill ${k.left===0?"bad":"warn"}">${k.left===0?t("Out of keys"):t("Running low")}</span>`:`<span class="muted">${fmt(k.used,0)} ${t("used so far")}</span>`}</div><div class="muted" style="font-size:12.5px;margin-top:6px">${fcText(k)}</div></div>`)
-  +`<div class="panel"><h2>${t("Stock")} <a href="#stock">${t("Open")}</a></h2><div class="big">${fmt(d.stock.units,0)}</div><div style="margin-top:4px">${lowStock?`<span class="pill warn">${plural(lowStock,"offer")} ${t("low")}</span>`:`<span class="muted">${t("All offers stocked")}</span>`}</div></div>`;
+  (hid("reviews")?"":`<div class="panel" data-help="mini-rev"><h2>${t("Reviews")} <a href="#reviews">${t("Open")}</a></h2><div class="big">${pct===null?"-":pct+"%"}</div><div class="muted">${r.positive} ${t("good")} · ${r.negative} ${t("bad")}</div></div>`)
+  +(hid("keys")?"":`<div class="panel" data-help="mini-keys"><h2>${t("Keys left")} <a href="#keys">${t("Open")}</a></h2><div class="big">${fmt(k.left,0)}</div><div style="margin-top:4px">${low?`<span class="pill ${k.left===0?"bad":"warn"}">${k.left===0?t("Out of keys"):t("Running low")}</span>`:`<span class="muted">${fmt(k.used,0)} ${t("used so far")}</span>`}</div><div class="muted" style="font-size:12.5px;margin-top:6px">${fcText(k)}</div></div>`)
+  +`<div class="panel" data-help="mini-stock"><h2>${t("Stock")} <a href="#stock">${t("Open")}</a></h2><div class="big">${fmt(d.stock.units,0)}</div><div style="margin-top:4px">${lowStock?`<span class="pill warn">${plural(lowStock,"offer")} ${t("low")}</span>`:`<span class="muted">${t("All offers stocked")}</span>`}</div></div>`;
 }
 
 // ================= sales =================
@@ -3063,9 +3372,10 @@ function salesTiles(d){
  const avg=o=>o.orders?amtOf(o)/o.orders:0;
  const bd=r.day.key?s.days[r.day.key]:null;
  $("stiles").innerHTML=
-  `<div class="tile"><div class="l">${t("Average order")}</div><div class="v">${cuHtml("s-avg",mv(avg(s.all)))} <small>${cur}</small></div><div class="s">${t("This month")}: ${s.month.orders?fmt(mv(avg(s.month))):"-"} ${cur}</div></div>`
-  +`<div class="tile"><div class="l">${t("Best day ever")} ${recBadge(r.day.record)}</div><div class="v">${cuHtml("s-best",mv(bd?dayAmt(bd):0))} <small>${cur}</small></div><div class="s">${r.day.key?esc(dayLabel2(r.day.key)):"-"}${r.day.orders?" · "+plural(r.day.orders,"order"):""}</div></div>`
-  +`<div class="tile"><div class="l">${t("Orders this month")}</div><div class="v">${cuHtml("s-ords",s.month.orders,0)}</div><div class="s">${t("All time")}: ${fmt(s.all.orders,0)}</div></div>`;
+  `<div class="tile" data-help="s-avg"><div class="l">${t("Average order")}</div><div class="v">${cuHtml("s-avg",mv(avg(s.all)))} <small>${cur}</small></div><div class="s">${t("This month")}: ${s.month.orders?fmt(mv(avg(s.month))):"-"} ${cur}</div></div>`
+  +`<div class="tile" data-help="s-best"><div class="l">${t("Best day ever")} ${recBadge(r.day.record)}</div><div class="v">${cuHtml("s-best",mv(bd?dayAmt(bd):0))} <small>${cur}</small></div><div class="s">${r.day.key?esc(dayLabel2(r.day.key)):"-"}${r.day.orders?" · "+plural(r.day.orders,"order"):""}</div></div>`
+  +(()=>{const g=growthInfo(s);return `<div class="tile" data-help="s-growth"><div class="l">${t("Growth this month")}</div><div class="v ${g?(g.pct>=0?"":"bad"):""}">${g?(g.pct>=0?"+":"−")+fmt(Math.abs(g.pct),0):"-"} <small>%</small></div><div class="s">${g?fmt(mv(g.cur))+" "+t("against")+" "+fmt(mv(g.prev))+" "+cur+" · "+t("same days last month"):t("Not enough history yet.")}</div></div>`;})()
+  +`<div class="tile" data-help="s-ords"><div class="l">${t("Orders this month")}</div><div class="v">${cuHtml("s-ords",s.month.orders,0)}</div><div class="s">${t("All time")}: ${fmt(s.all.orders,0)}</div></div>`;
  runCountUps($("stiles"));
 }
 function records(d){
@@ -3115,8 +3425,9 @@ function fees(d){
 }
 function months(d){
  const rows=[...d.sales.months].reverse().filter((x,i)=>x.orders>0||i<3),c=d.sales.currency;
- $("months").innerHTML=`<table><thead><tr><th>${t("Month")}</th><th class="r">${t("Sales")}</th><th class="r">${t("Fees")}</th><th class="r">${t("Orders")}</th></tr></thead><tbody>${
-  rows.map(x=>`<tr><td>${esc(monthLabel(x.key))}</td><td class="r mono">${money(GROSS?x.gross:x.amount,c)}</td><td class="r mono muted">${money(x.gross-x.amount,c)}</td><td class="r muted">${x.orders}</td></tr>`).join("")}</tbody></table>`;
+ $("months").innerHTML=`<table><thead><tr><th>${t("Month")}</th><th class="r">${t("Sales")}</th><th class="r">${t("Fees")}</th><th class="r">${t("Orders")}</th><th class="r">${t("Growth")}</th></tr></thead><tbody>${
+  rows.map((x,i)=>{const pv=rows[i+1],v=GROSS?x.gross:x.amount,pvv=pv?(GROSS?pv.gross:pv.amount):0,gp=pvv>0?(v/pvv-1)*100:null;
+  return `<tr><td>${esc(monthLabel(x.key))}</td><td class="r mono">${money(GROSS?x.gross:x.amount,c)}</td><td class="r mono muted">${money(x.gross-x.amount,c)}</td><td class="r muted">${x.orders}</td><td class="r">${gp===null?'<span class="muted">-</span>':`<span class="gr ${grCls(gp)}">${grTxt(gp)}</span>`}</td></tr>`;}).join("")}</tbody></table>`;
 }
 
 // ================= stock / reviews / keys =================
@@ -3177,13 +3488,13 @@ const CURRENCIES_ALL=()=>[MAIN,"DKK","USD","EUR"];
 const K0=()=>[LANG,HIDE];
 function render(d){
  isAdmin=d.user.role==="admin";
- ["navusers","navwar","navmind","navprofit"].forEach(id=>{$(id).hidden=!isAdmin;});
+ ["navusers","navwar","navmind","navprofit","navprog"].forEach(id=>{$(id).hidden=!isAdmin;});
  if(ADMIN_PAGES.includes(page())&&!isAdmin){location.hash="#overview";return;}
  MAIN=d.rates.base;RATES=d.rates.rates;RATES_LIVE=d.rates.live;RATES_DATE=d.rates.date;
  if(!prefsApplied){prefsApplied=true;applyServerPrefs(d.prefs);translateStatic();setTitle();settingsUi();}
  const q=$("quote");q.hidden=!d.quote;q.textContent=d.quote||"";
  $("who").textContent=d.user.name;$("role").textContent=t(d.user.role==="admin"?"admin":"viewer");$("av").textContent=d.user.name.slice(0,1);
- curUi();detectEvents(d);newsNav();once("tax",[d.profit,PREFS.tax,PREFS.hide,K0()],()=>taxpot(d));
+ curUi();detectEvents(d);newsNav();once("menu",[PREFS.menu,PREFS.pins,isAdmin],applyMenu);once("tax",[d.profit,PREFS.tax,PREFS.hide,K0()],()=>taxpot(d));
  const p=page(),K=[GROSS,shownCur(),HIDE,LANG];
  if(p==="overview"){applyHides();once("status",[d.status,K],()=>statusPanel(d));once("welcome",[d.sales,d.reviews,d.pending.n,d.keys.left,K],()=>welcome(d));
   once("tiles",[d.sales,d.stock.units,d.stock.offers.length,d.profit,d.orders[0],d.reviews,PREFS.hide,K],()=>tiles(d));$("cur1").textContent=shownCur()+" · "+feeNote();$("mt1").textContent=monthTitle();
@@ -3251,6 +3562,7 @@ function orderView(o){
   <div class="r1"><div>${t("Quantity")}</div><div class="v">${esc(o.quantity)}</div></div>
   <div class="r1"><div>${t("Buyer")}</div><div class="v"><button class="lnk" data-buyer="${esc(o.buyer)}">${esc(o.buyer)}</button> <button class="btn copy" data-copy="${esc(o.buyer)}">${t("Copy")}</button></div></div>
   <div class="r1"><div>${t("Placed")}</div><div class="v" style="font-weight:500">${esc(full(o.time))}</div></div>
+  ${payoutDate(o)?`<div class="r1"><div>${t("Expected payout")}<small>${t("your own estimate")}</small></div><div class="v" style="font-weight:500">${esc(payoutDate(o).toLocaleDateString(LOC(),{weekday:"short",day:"numeric",month:"short"}))}</div></div>`:""}
   <div class="r1"><div>${t("Order ID")}<small style="overflow-wrap:anywhere;max-width:230px">${esc(o.id)}</small></div><div class="v"><button class="btn copy" data-copy="${esc(o.id)}">${t("Copy")}</button></div></div></div>`;
  if(idx!==undefined){
   const steps=[["Paid",t("Paid")],["Delivered",t("Delivered")],["Completed",t("Completed")]],log=o.log||{};
@@ -3346,9 +3658,9 @@ const kindName=k=>k==="monthly"?t("every month"):t("one time");
 function profitDraw(){
  if(!PF)return;const p=PF.profit,c=p.currency,cur=esc(shownCur()),m=p.this_month;
  const pill=v=>`<span style="color:${v<0?"var(--red)":"inherit"}">${fmt(mv(v))}</span>`;
- $("ptiles").innerHTML=`<div class="tile"><div class="l">${t("Profit this month")}</div><div class="v">${pill(m.profit)} <small>${cur}</small></div><div class="s">${t("Sales")} ${fmt(mv(m.sales))} − ${t("costs")} ${fmt(mv(m.costs+m.keys))}</div></div>
-  <div class="tile"><div class="l">${t("Profit all time")}</div><div class="v">${pill(p.total.profit)} <small>${cur}</small></div><div class="s">${plural(p.total.orders,"order")}</div></div>
-  <div class="tile"><div class="l">${t("Costs all time")}</div><div class="v">${fmt(mv(p.total.costs+p.total.keys))} <small>${cur}</small></div><div class="s">${t("incl. keys")} ${fmt(mv(p.total.keys))}</div></div>`;
+ $("ptiles").innerHTML=`<div class="tile" data-help="p-month"><div class="l">${t("Profit this month")}</div><div class="v">${pill(m.profit)} <small>${cur}</small></div><div class="s">${t("Sales")} ${fmt(mv(m.sales))} − ${t("costs")} ${fmt(mv(m.costs+m.keys))}</div></div>
+  <div class="tile" data-help="p-all"><div class="l">${t("Profit all time")}</div><div class="v">${pill(p.total.profit)} <small>${cur}</small></div><div class="s">${plural(p.total.orders,"order")}</div></div>
+  <div class="tile" data-help="p-costs"><div class="l">${t("Costs all time")}</div><div class="v">${fmt(mv(p.total.costs+p.total.keys))} <small>${cur}</small></div><div class="s">${t("incl. keys")} ${fmt(mv(p.total.keys))}</div></div>`;
  $("clist").innerHTML=PF.items.length?PF.items.map(i=>`<div class="row2"><div class="t">${esc(i.name)}<small>${kindName(i.kind)} · ${esc(i.date||"")}</small></div><div class="e"><div class="mono">${fmt(i.amount)} ${esc(i.currency)}</div>${i.currency!==c?`<small class="muted">≈ ${money(i.main,c)}</small><br>`:""}<button class="btn copy" data-delcost="${esc(i.id)}">${t("Delete")}</button></div></div>`).join(""):`<div class="empty">${t("No costs added yet.")}</div>`;
  $("pmonths").innerHTML=`<table><thead><tr><th>${t("Month")}</th><th class="r">${t("Sales")}</th><th class="r">${t("Costs")}</th><th class="r">${t("Keys")}</th><th class="r">${t("Profit")}</th></tr></thead><tbody>${p.months.map(x=>`<tr><td>${esc(monthLabel(x.key))}</td><td class="r mono">${money(x.sales,c)}</td><td class="r mono muted">${money(x.costs,c)}</td><td class="r mono muted">${money(x.keys,c)}</td><td class="r mono" style="font-weight:650;${x.profit<0?"color:var(--red)":""}">${money(x.profit,c)}</td></tr>`).join("")}</tbody></table>`;
  $("pnote").textContent=t("sales after fees − costs");
@@ -3412,13 +3724,13 @@ async function loadHistory(){
 }
 function histRender(){
  const j=HLAST;if(!j)return;const c=j.currency;
- const tile=(l,v,sub,cls)=>`<div class="tile"><div class="l">${l}</div><div class="v ${cls||""}">${v}</div><div class="s">${sub}</div></div>`;
+ const tile=(l,v,sub,cls,hk)=>`<div class="tile" data-help="${hk}"><div class="l">${l}</div><div class="v ${cls||""}">${v}</div><div class="s">${sub}</div></div>`;
  const sg=(v,s)=>(Math.abs(v)<0.005?"":s>0?"+":"−")+fmt(mv(Math.abs(v)));
  $("htiles").innerHTML=
-  tile(t("Added today"),sg(j.added_today,1)+" <small>"+esc(shownCur())+"</small>",plural(j.n_added_today,"order"))
-  +tile(t("Removed today"),sg(j.removed_today,-1)+" <small>"+esc(shownCur())+"</small>",plural(j.n_removed_today,"order"),j.removed_today?"bad":"")
-  +tile(t("Net this month"),sg(j.added_month-j.removed_month,j.added_month-j.removed_month>=0?1:-1)+" <small>"+esc(shownCur())+"</small>",t("Added")+" "+fmt(mv(j.added_month))+" · "+t("Removed")+" "+fmt(mv(j.removed_month)))
-  +tile(t("Balance now"),fmt(mv(j.balance))+" <small>"+esc(shownCur())+"</small>",feeNote());
+  tile(t("Added today"),sg(j.added_today,1)+" <small>"+esc(shownCur())+"</small>",plural(j.n_added_today,"order"),"","h-added")
+  +tile(t("Removed today"),sg(j.removed_today,-1)+" <small>"+esc(shownCur())+"</small>",plural(j.n_removed_today,"order"),j.removed_today?"bad":"","h-removed")
+  +tile(t("Net this month"),sg(j.added_month-j.removed_month,j.added_month-j.removed_month>=0?1:-1)+" <small>"+esc(shownCur())+"</small>",t("Added")+" "+fmt(mv(j.added_month))+" · "+t("Removed")+" "+fmt(mv(j.removed_month)),"","h-net")
+  +tile(t("Balance now"),fmt(mv(j.balance))+" <small>"+esc(shownCur())+"</small>",feeNote(),"","h-bal");
  const ev=j.events;
  $("hnote").textContent=j.total?plural(j.total,"event"):"";
  if(!ev.length){$("hlist").innerHTML=`<div class="empty">${t("Nothing yet.")}</div>`;$("hmore").hidden=true;return;}
@@ -3460,7 +3772,7 @@ function settingsUi(){
   +`<input type="color" id="accpick" value="${/^#[0-9a-f]{6}$/i.test(acc)?acc:"#34d399"}" title="${esc(t("Pick any colour"))}" aria-label="${esc(t("Pick any colour"))}">`;
  $("accpick").oninput=e=>{PREFS.accent=e.target.value;syncLocal();applyAccent();};
  $("accpick").onchange=e=>setAccent(e.target.value);
- curUi();tglUi();
+ curUi();tglUi();menuUi();if(document.activeElement!==$("payout"))$("payout").value=PREFS.payout==null?7:PREFS.payout;
  $("bgSeg").innerHTML=BGS.map(b=>`<button type="button" class="chip${(PREFS.bg||"")===b[0]?" on":""}" data-bg="${b[0]}">${esc(t(b[1]))}</button>`).join("");
  const defs=[["today","Today"],["month","This month"],["all","All time"],["avg","Average order"],["stock","In stock"],["profit","Profit this month",1],["taxpot","Tax pot",1],["lastorder","Latest order"],["revrate","Reviews per order"],["chart","Sales per month"],["latest","Latest orders"],["pending","Waiting to be completed"],["reviews","Reviews"],["keys","Keys left"]];
  $("tilesel").innerHTML=defs.filter(x=>!x[2]||isAdmin).map(x=>`<label class="tgl"><div>${esc(t(x[1]))}</div><input type="checkbox" data-tile="${x[0]}"${hid(x[0])?"":" checked"}></label>`).join("");
@@ -3517,7 +3829,15 @@ qsa("[data-n]").forEach(c=>{c.onchange=()=>{PREFS.notify[c.dataset.n]=c.checked;
 $("logout").onclick=async()=>{await post("/logout");location="/login";};
 
 // ================= what's new =================
-const NEWS=[{v:"2026-10-27",d:"2026-10-27",title:["History","Historik"],items:[
+const NEWS=[{v:"2026-10-27 · 2",d:"2026-10-27",title:["More tools","Flere værktøjer"],items:[
+ ["Programs page: the dashboard now starts order alerts, reviews, stock, stats and offer itself, shows if each one runs, and lets you restart one or watch its log live","Programmer-side: dashboardet starter nu ordre-alarmer, anmeldelser, lager, statistik og offer selv, viser om hver kører, og lader dig genstarte en eller se dens log live"],
+ ["Growth in percent against the same days of last month, on the overview, on Sales and per month","Vækst i procent mod de samme dage sidste måned, på overblikket, på Salg og pr. måned"],
+ ["Expected payout date on orders that are waiting (set the number of days in Settings)","Forventet udbetalingsdato på ordrer, der venter (sæt antal dage i Indstillinger)"],
+ ["Tap any number or box for a short explanation","Tryk på et tal eller en boks for en kort forklaring"],
+ ["Change the order of the menu and pin your favourite pages (Settings)","Skift rækkefølgen på menuen og fastgør dine favoritsider (Indstillinger)"],
+ ["News archive, and the latest changes from GitHub on this page","Nyhedsarkiv og de seneste ændringer fra GitHub på denne side"],
+ ["Now you only need to run py dashboard.py","Nu behøver du kun at køre py dashboard.py"]]},
+{v:"2026-10-27",d:"2026-10-27",title:["History","Historik"],items:[
  ["New History page: every time an order is added (+) or cancelled and taken off (−), with the amount and the balance after it","Ny Historik-side: hver gang en ordre lægges til (+) eller annulleres og trækkes fra (−), med beløbet og saldoen efter"],
  ["Filter on added or removed, see totals for today and this month","Filtrér på tilføjet eller fratrukket, se totaler for i dag og denne måned"],
  ["Note: cancelled orders show from the moment the history started. Update order_alerts.py too","Bemærk: annullerede ordrer vises fra det tidspunkt, historikken startede. Opdatér også order_alerts.py"]]},
@@ -3553,15 +3873,104 @@ const NEWS=[{v:"2026-10-27",d:"2026-10-27",title:["History","Historik"],items:[
  ["Loading placeholders, pull down to refresh on your phone, small number animations","Pladsholdere mens der indlæses, træk ned for at opdatere på mobilen, små tal-animationer"]]}];
 const newsActive=()=>NEWS.filter(n=>{const [y,m,d]=n.d.split("-").map(Number);return (Date.now()-new Date(y,m-1,d).getTime())/864e5<7;});
 function newsNav(){
- const on=newsActive().length>0,a=qs('[data-p="news"]');
- qsa('[data-p="news"]').forEach(x=>{x.hidden=!on;});
- if(!on){$("newdot").hidden=true;if(page()==="news")location.hash="#overview";}
- else $("newdot").hidden=lsGet("seen_ver","")===VERSION;
+ const on=newsActive().length>0;
+ qsa('[data-p="news"]').forEach(x=>{x.hidden=!on&&page()!=="news";});
+ $("newdot").hidden=!on||lsGet("seen_ver","")===VERSION;
 }
 function newsRender(){
- $("newsbox").innerHTML=newsActive().map(n=>`<div class="relnote"><h3>${esc(n.title[LANG==="da"?1:0])} <span class="muted" style="font-weight:400;font-size:13px">${esc(n.v)}</span></h3><ul>${n.items.map(i=>`<li>${esc(i[LANG==="da"?1:0])}</li>`).join("")}</ul></div>`).join("");
- lsSet("seen_ver",VERSION);$("newdot").hidden=true;
+ const act=new Set(newsActive().map(n=>n.v)),li=n=>`<div class="relnote"><h3>${esc(n.title[LANG==="da"?1:0])} <span class="muted" style="font-weight:400;font-size:13px">${esc(n.v)}</span></h3><ul>${n.items.map(i=>`<li>${esc(i[LANG==="da"?1:0])}</li>`).join("")}</ul></div>`;
+ const now=NEWS.filter(n=>act.has(n.v)),old=NEWS.filter(n=>!act.has(n.v));
+ $("newsbox").innerHTML=(now.length?now.map(li).join(""):`<div class="muted">${t("No new news right now.")}</div>`)
+  +(old.length?`<h2 style="margin:20px 0 8px;font-size:15px">${t("Earlier news")}</h2>`+old.map(li).join(""):"");
+ lsSet("seen_ver",VERSION);$("newdot").hidden=true;loadChangelog();
 }
+async function loadChangelog(){
+ try{const r=await fetch("/api/changelog");if(!r.ok)return;const j=await r.json();
+  $("chhead").innerHTML=j.head?`<span class="pill">${esc(j.head)}</span>`:"";
+  $("chlog").innerHTML=j.rows.length?j.rows.map(x=>`<div class="chrow"><time>${esc(new Date(x.date).toLocaleDateString(LOC(),{day:"numeric",month:"short",year:"numeric"}))}</time><div>${esc(x.text)}</div></div>`).join("")
+   :`<div class="empty">${t("The change log shows when this folder is a Git clone (updated with opdater.bat).")}</div>`;
+ }catch(e){}
+}
+
+// ================= programs (admin) =================
+const PRG={open:{},last:{},busy:{}};
+const dur=s=>{s=Math.max(0,Math.floor(s));if(s<60)return s+" s";const m=Math.floor(s/60);if(m<60)return m+" min";const h=Math.floor(m/60);if(h<48)return h+" h "+(m%60)+" min";return plural(Math.floor(h/24),"day");};
+async function loadPrograms(){
+ if(!isAdmin)return;
+ try{const r=await fetch("/api/programs");if(!r.ok)return;const j=await r.json();
+  if(!j.managed){$("proglist").innerHTML=`<div class="empty">${t("The dashboard is not starting the programs. Run it with  py dashboard.py  (without --no-programs).")}</div>`;$("progsum").innerHTML="";return;}
+  const bad=j.programs.filter(p=>!p.running).length;
+  $("progsum").innerHTML=bad?`<span class="pill bad">${plural(bad,"program")} ${t("stopped")}</span>`:`<span class="pill good">${t("All running")}</span>`;
+  const keepLog={};qsa("#proglist .plog").forEach(e=>{keepLog[e.dataset.n]=e.scrollTop+e.clientHeight>=e.scrollHeight-30;});
+  $("proglist").innerHTML=j.programs.map(p=>{
+   const cls=p.running?(p.quiet!==null&&p.quiet>3600?"warn":"ok"):(p.state==="restarting"?"warn":"bad");
+   const st=p.running?t("Running for")+" "+dur(p.uptime):({restarting:t("Restarting"),missing:t("File not found"),crashed:t("Stopped, starting again")}[p.state]||t("Stopped"));
+   const open=!!PRG.open[p.name];
+   return `<div class="prog" data-n="${esc(p.name)}"><div class="ph"><span class="pdot ${cls}"></span>
+    <div class="pn"><b>${esc(p.name)}</b> <span class="muted">${esc(p.script)}</span><small>${esc(st)}${p.quiet!==null?" · "+t("last output")+" "+dur(p.quiet)+" "+t("ago"):""}${p.restarts?" · "+t("restarted")+" "+plural(p.restarts,"time"):""}</small></div>
+    <button class="btn" data-plog="${esc(p.name)}">${open?t("Hide log"):t("Show log")}</button>
+    <button class="btn" data-prestart="${esc(p.name)}">${PRG.busy[p.name]?t("Sure?"):t("Restart")}</button></div>
+    ${open?`<pre class="plog" data-n="${esc(p.name)}"></pre>`:""}</div>`;}).join("");
+  for(const n of Object.keys(PRG.open)){if(PRG.open[n]){PRG.last[n]=PRG.last[n]||0;drawLog(n,true);}}
+ }catch(e){}
+}
+const LOGS={};
+async function drawLog(n,fresh){
+ const el=qs('.plog[data-n="'+n+'"]');if(!el)return;
+ if(fresh){el.innerHTML=(LOGS[n]||[]).map(logLine).join("");el.scrollTop=el.scrollHeight;}
+ try{const r=await fetch("/api/programs/"+encodeURIComponent(n)+"/log?after="+(PRG.last[n]||0));if(!r.ok)return;const j=await r.json();
+  if(j.lines.length){const stick=el.scrollTop+el.clientHeight>=el.scrollHeight-30;
+   LOGS[n]=(LOGS[n]||[]).concat(j.lines).slice(-400);PRG.last[n]=j.last;
+   el.insertAdjacentHTML("beforeend",j.lines.map(logLine).join(""));
+   while(el.childNodes.length>400)el.removeChild(el.firstChild);
+   if(stick||fresh)el.scrollTop=el.scrollHeight;}
+ }catch(e){}
+}
+const logLine=l=>`<div class="${/error|traceback|exception|failed|fejl|stopped \(code [1-9]/i.test(l.x)?"e":""}"><span class="tt">${esc(new Date(l.t).toLocaleTimeString(LOC()))}</span> ${esc(l.x)}</div>`;
+document.addEventListener("click",async e=>{
+ const lg=e.target.closest("[data-plog]");
+ if(lg){const n=lg.dataset.plog;PRG.open[n]=!PRG.open[n];if(!PRG.open[n]){delete LOGS[n];PRG.last[n]=0;}loadPrograms();return;}
+ const rs=e.target.closest("[data-prestart]");
+ if(rs){const n=rs.dataset.prestart;
+  if(!PRG.busy[n]){PRG.busy[n]=true;rs.textContent=t("Sure?");setTimeout(()=>{PRG.busy[n]=false;loadPrograms();},3000);return;}
+  PRG.busy[n]=false;rs.disabled=true;await post("/api/programs/"+encodeURIComponent(n)+"/restart");PRG.last[n]=0;LOGS[n]=[];setTimeout(loadPrograms,1200);}
+});
+
+// ================= menu order and pins =================
+const MENU_DEFAULT=()=>PAGES;
+function menuOrder(){
+ const base=[...(PREFS.menu||[]),...MENU_DEFAULT()].filter((x,i,a)=>PAGES.includes(x)&&a.indexOf(x)===i);
+ const pins=new Set(PREFS.pins||[]);return [...base.filter(x=>pins.has(x)),...base.filter(x=>!pins.has(x))];
+}
+function applyMenu(){
+ const nav=$("nav");if(!nav)return;const by={};qsa("a",nav).forEach(a=>{by[a.dataset.p]=a;});
+ const pins=new Set(PREFS.pins||[]);
+ menuOrder().forEach(p=>{if(by[p]){nav.appendChild(by[p]);by[p].classList.toggle("pinned",pins.has(p));}});
+}
+function menuSave(order,pins){PREFS.menu=order;PREFS.pins=pins;savePrefs();applyMenu();menuUi();}
+function menuUi(){
+ const box=$("menuedit");if(!box)return;
+ const vis=p=>!ADMIN_PAGES.includes(p)||isAdmin,list=menuOrder().filter(vis),pins=new Set(PREFS.pins||[]);
+ box.innerHTML=list.map((p,i)=>`<div class="mrow" draggable="true" data-m="${p}"><span class="muted">⋮⋮</span><span class="nm">${esc(t(TITLES[p]))}</span>
+  <button type="button" data-mup="${p}" ${i===0?"disabled":""} aria-label="${esc(t("Move up"))}">▲</button><button type="button" data-mdn="${p}" ${i===list.length-1?"disabled":""} aria-label="${esc(t("Move down"))}">▼</button>
+  <button type="button" class="${pins.has(p)?"on":""}" data-mpin="${p}" aria-label="${esc(t("Pin"))}">${pins.has(p)?"★":"☆"}</button></div>`).join("");
+}
+function menuMove(p,dir){const o=menuOrder(),i=o.indexOf(p),vis=x=>!ADMIN_PAGES.includes(x)||isAdmin;
+ let j=i+dir;while(j>=0&&j<o.length&&!vis(o[j]))j+=dir;if(j<0||j>=o.length)return;
+ [o[i],o[j]]=[o[j],o[i]];menuSave(o,PREFS.pins||[]);}
+$("menuedit").onclick=e=>{
+ const u=e.target.closest("[data-mup]"),d=e.target.closest("[data-mdn]"),p=e.target.closest("[data-mpin]");
+ if(u)menuMove(u.dataset.mup,-1);else if(d)menuMove(d.dataset.mdn,1);
+ else if(p){const s=new Set(PREFS.pins||[]);s.has(p.dataset.mpin)?s.delete(p.dataset.mpin):s.add(p.dataset.mpin);menuSave(menuOrder(),[...s]);}
+};
+let mdrag=null;
+$("menuedit").addEventListener("dragstart",e=>{const r=e.target.closest(".mrow");if(!r)return;mdrag=r.dataset.m;r.classList.add("drag");try{e.dataTransfer.setData("text/plain",mdrag);e.dataTransfer.effectAllowed="move";}catch(x){}});
+$("menuedit").addEventListener("dragover",e=>{const r=e.target.closest(".mrow");if(!r||!mdrag)return;e.preventDefault();qsa(".mrow.over").forEach(x=>x.classList.remove("over"));r.classList.add("over");});
+$("menuedit").addEventListener("dragend",()=>{mdrag=null;qsa(".mrow").forEach(x=>x.classList.remove("drag","over"));});
+$("menuedit").addEventListener("drop",e=>{const r=e.target.closest(".mrow");if(!r||!mdrag)return;e.preventDefault();
+ const o=menuOrder().filter(x=>x!==mdrag),to=o.indexOf(r.dataset.m);o.splice(to<0?o.length:to,0,mdrag);mdrag=null;menuSave(o,PREFS.pins||[]);});
+$("menureset").onclick=()=>menuSave([],[]);
+$("payout").onchange=e=>{let v=parseInt(e.target.value,10);if(!(v>=0))v=7;v=Math.min(90,v);PREFS.payout=v;e.target.value=v;savePrefs();rerender();};
 
 // ================= translate the fixed text on the page =================
 const ORIG=new WeakMap();
@@ -3582,6 +3991,7 @@ function pageLoad(force){
  if(p==="orders"&&(force||now-TT.orders>4500)){TT.orders=now;loadOrders();}
  if(p==="profit"&&isAdmin&&(force||now-TT.profit>15000)){TT.profit=now;loadProfit();}
  if(p==="history"&&(force||now-TT.hist>6000)){TT.hist=now;loadHistory();}
+ if(p==="programs"&&isAdmin&&force){loadPrograms();}
  if(p==="users"&&isAdmin&&(force||now-TT.users>10000)){TT.users=now;users();loadDevices();}
  if(p==="settings"&&(force||now-TT.dev>15000)){TT.dev=now;loadDevices();}
  if(p==="settings")settingsUi();
@@ -3898,6 +4308,56 @@ $("install").onclick=async()=>{
 };
 installUi();
 
+
+// ================= short explanations when you tap a number =================
+const HELP={
+ "t-today":["Sales today, after Eldorado's fees (or before them if you chose Gross). The small line shows the number of orders.","Dagens salg efter Eldorados gebyrer (eller før, hvis du har valgt Brutto). Den lille linje viser antal ordrer."],
+ "t-month":["Sales so far this month. The arrow compares with the same days of last month.","Salg hidtil denne måned. Pilen sammenligner med de samme dage sidste måned."],
+ "t-all":["Everything counted since the dashboard started following your orders.","Alt der er talt med, siden dashboardet begyndte at følge dine ordrer."],
+ "t-avg":["The average sale: the total divided by the number of orders.","Gennemsnitligt salg: samlet beløb delt med antal ordrer."],
+ "t-stock":["Units in stock across all your offers on Eldorado.","Antal enheder på lager på tværs af alle dine tilbud på Eldorado."],
+ "t-profit":["Sales after fees minus your costs (VPS, keys and so on) this month. Add costs on the Profit page.","Salg efter gebyrer minus dine omkostninger (VPS, keys osv.) denne måned. Tilføj omkostninger på Profit-siden."],
+ "taxpot":["A joke counter: the percent you set in Settings, of your profit, in kroner. It shows how much tax we would have paid.","En joke-tæller: den procent, du har sat i Indstillinger, af din profit, i kroner. Viser hvor meget skat vi ville have betalt."],
+ "lastorder":["Time since the latest order. It turns amber after 2 hours and red after 6 hours without a sale.","Tid siden seneste ordre. Den bliver gul efter 2 timer og rød efter 6 timer uden salg."],
+ "revrate":["The share of all your orders that have got a review.","Andelen af alle dine ordrer, der har fået en anmeldelse."],
+ "s-avg":["The average sale: the total divided by the number of orders.","Gennemsnitligt salg: samlet beløb delt med antal ordrer."],
+ "s-best":["Your best day so far, counted after fees.","Din bedste dag indtil nu, regnet efter gebyrer."],
+ "s-ords":["How many orders you have had this month.","Hvor mange ordrer du har haft denne måned."],
+ "s-growth":["This month so far, compared with the same days of last month. Green is more, red is less.","Denne måned indtil nu sammenlignet med de samme dage sidste måned. Grøn er mere, rød er mindre."],
+ "records":["Your best day, week and month so far. “New record!” means it is happening right now.","Din bedste dag, uge og måned indtil nu. “Ny rekord!” betyder, at det sker lige nu."],
+ "fees":["What Eldorado keeps from your sales, and how much of the buyers' money you keep.","Hvad Eldorado tager af dit salg, og hvor stor en del af købernes penge du beholder."],
+ "months":["Every month with sales, fees and orders. Growth compares with the month before.","Hver måned med salg, gebyrer og ordrer. Vækst sammenligner med måneden før."],
+ "calendar":["Every day shows its sales and number of orders. The darker green, the better the day. Tap a day to see its orders.","Hver dag viser sit salg og antal ordrer. Jo mørkere grøn, jo bedre dag. Tryk på en dag for at se ordrerne."],
+ "h-added":["Money added today from new orders, after fees.","Penge lagt til i dag fra nye ordrer, efter gebyrer."],
+ "h-removed":["Money taken off today because orders were cancelled or refunded.","Penge trukket fra i dag, fordi ordrer blev annulleret eller refunderet."],
+ "h-net":["Added minus removed this month.","Tilføjet minus fratrukket denne måned."],
+ "h-bal":["Your total sales right now, after everything added and removed.","Dit samlede salg lige nu, efter alt der er lagt til og trukket fra."],
+ "p-month":["This month's sales after fees, minus your costs and the cost of the keys sold.","Månedens salg efter gebyrer, minus dine omkostninger og prisen på de solgte keys."],
+ "p-all":["Profit since the start: all sales after fees minus all costs.","Profit siden start: alt salg efter gebyrer minus alle omkostninger."],
+ "p-costs":["Everything you have added as costs, plus the price of the keys you have sold.","Alt hvad du har tilføjet som omkostninger, plus prisen på de keys, du har solgt."],
+ "mini-rev":["The share of good reviews out of all reviews.","Andelen af gode anmeldelser ud af alle anmeldelser."],
+ "mini-keys":["Keys waiting to be uploaded to Eldorado. The line below estimates how long they last at the pace of the last 7 days.","Keys der venter på at blive uploadet til Eldorado. Linjen under anslår, hvor længe de rækker i tempoet fra de seneste 7 dage."],
+ "mini-stock":["Units that are for sale on Eldorado right now.","Enheder, der er til salg på Eldorado lige nu."],
+ "status":["Shows if the dashboard can reach Eldorado. If something fails, it tries again by itself.","Viser om dashboardet kan nå Eldorado. Hvis noget fejler, prøver det igen af sig selv."]
+};
+let helpTimer=null,helpAt=0;
+function helpHide(){const h=$("help");h.hidden=true;clearTimeout(helpTimer);}
+document.addEventListener("click",e=>{
+ const h=$("help");
+ if(!h.hidden&&!e.target.closest("[data-help]"))helpHide();
+ const el=e.target.closest("[data-help]");if(!el)return;
+ if(e.target.closest("button,a,input,select,textarea,label,[data-oid],[data-buyer],[data-copy],.row2,.cd,.hrow"))return;
+ const tx=HELP[el.dataset.help];if(!tx)return;
+ h.textContent=tx[LANG==="da"?1:0];h.hidden=false;
+ const r=el.getBoundingClientRect(),w=h.offsetWidth,hh=h.offsetHeight;
+ let top=r.bottom+8;if(top+hh>innerHeight-8)top=Math.max(8,r.top-hh-8);
+ h.style.top=top+"px";h.style.left=Math.min(Math.max(8,r.left+12),innerWidth-w-8)+"px";
+ helpAt=Date.now();clearTimeout(helpTimer);helpTimer=setTimeout(helpHide,9000);
+});
+document.addEventListener("keydown",e=>{if(e.key==="Escape")helpHide();});
+window.addEventListener("scroll",()=>{if(Date.now()-helpAt>600)helpHide();},{passive:true});
+setInterval(()=>{if(page()==="programs"&&isAdmin&&!document.hidden)loadPrograms();},2000);
+
 // ================= start =================
 let rt;window.addEventListener("resize",()=>{clearTimeout(rt);rt=setTimeout(()=>{if(window.__last){delete seen.c1;delete seen.c2;delete seen.cal;render(window.__last);}},150);});
 window.__render=d=>{window.__last=d;render(d);};
@@ -3928,6 +4388,7 @@ def main():
     ap.add_argument("name", nargs="?")
     ap.add_argument("--admin", action="store_true")
     ap.add_argument("--show", action="store_true", help="show the password while typing")
+    ap.add_argument("--no-programs", action="store_true", help="do not start order_alerts, review_alerts, stock_board, stats_board and offer")
     a = ap.parse_args()
 
     if a.cmd == "adduser":
@@ -3959,6 +4420,10 @@ def main():
         if not load_users():
             raise SystemExit("No users yet. Create the first one:  py dashboard.py adduser YOURNAME --admin")
         threading.Thread(target=poll_loop, daemon=True).start()
+        if not a.no_programs and os.getenv("MANAGE_PROGRAMS", "1") != "0":
+            only = {x.strip() for x in os.getenv("PROGRAMS", "").split(",") if x.strip()}
+            start_programs(only or None)
+            print("Starting the other programs: " + ", ".join(n for n, _, _ in PROGRAM_LIST if not only or n in only))
 
     print(f"Dashboard on http://localhost:{PORT}  (stop with Ctrl+C)")
     try:
