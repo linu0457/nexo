@@ -74,11 +74,11 @@ PRESENCE_FILE, DEVICES_FILE = Path("presence.json"), Path("devices.json")
 CURRENCIES = ("DKK", "USD", "EUR")
 SOUNDS = ("ding", "bell", "pop", "chime", "none")
 NOTIFY_KINDS = ("warroom", "orders", "reviews", "keys")
-OVERVIEW_TILES = ("today", "month", "all", "avg", "stock", "profit", "taxpot", "lastorder", "revrate", "pending", "reviews", "keys", "latest", "chart")
+OVERVIEW_TILES = ("today", "month", "all", "avg", "stock", "profit", "taxpot", "lastorder", "revrate", "pending", "reviews", "keys", "latest", "chart", "stockp", "status", "others")
 NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys", "warroom", "mindmap", "profit", "programs", "users", "settings", "news")
 BACKGROUNDS = ("", "dots", "grid", "waves", "aurora", "diagonal")
 DEFAULT_PREFS = {"lang": "", "accent": "", "currency": "", "sound": "ding", "gross": None, "tax": 37,
-                 "emoji": "", "color": "", "bg": "", "hide": [], "menu": [], "pins": [], "payout": 5,
+                 "emoji": "", "color": "", "bg": "", "hide": [], "menu": [], "pins": [], "payout": 5, "ovorder": [],
                  "notify": {"warroom": True, "orders": False, "reviews": True, "keys": True}}
 
 _mem = {}                      # demo mode keeps its small data files in memory only
@@ -326,6 +326,8 @@ def prefs_of(name):
             out[k] = [x for i, x in enumerate(p[k]) if x in NAV_PAGES and x not in p[k][:i]]
     if isinstance(p.get("payout"), (int, float)) and not isinstance(p.get("payout"), bool) and 0 <= p["payout"] <= 90:
         out["payout"] = int(p["payout"])
+    if isinstance(p.get("ovorder"), list):
+        out["ovorder"] = [x for i, x in enumerate(p["ovorder"]) if x in OVERVIEW_TILES and x not in p["ovorder"][:i]]
     if isinstance(p.get("hide"), list):
         out["hide"] = [x for x in p["hide"] if x in OVERVIEW_TILES]
     return out
@@ -1286,6 +1288,8 @@ def api_prefs():
                 p[k] = [x for i, x in enumerate(j[k]) if x in NAV_PAGES and x not in j[k][:i]]
         if isinstance(j.get("payout"), (int, float)) and not isinstance(j.get("payout"), bool) and 0 <= j["payout"] <= 90:
             p["payout"] = int(j["payout"])
+        if isinstance(j.get("ovorder"), list):
+            p["ovorder"] = [x for i, x in enumerate(j["ovorder"]) if x in OVERVIEW_TILES and x not in j["ovorder"][:i]]
         if isinstance(j.get("hide"), list):
             p["hide"] = [x for x in j["hide"] if x in OVERVIEW_TILES]
         if isinstance(j.get("notify"), dict):
@@ -2516,6 +2520,20 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
 #nav a.pinned:after{content:"\2605";margin-left:auto;font-size:10px;color:var(--amber)}
 @media(max-width:820px){#nav a.pinned:after{display:none}}
 body.hide .prog .pn small{filter:none}
+
+/* overview editing */
+#ovg{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px}
+#ovg #tiles,#ovg .grid,#ovg .grid2,#ovg #mini{display:contents}
+#ovg .tile{grid-column:span 3}
+#ovg [data-mod="chart"]{grid-column:span 7}#ovg [data-mod="latest"]{grid-column:span 5}#ovg [data-mod="pending"]{grid-column:span 6}
+#ovg [data-mod="reviews"],#ovg [data-mod="keys"],#ovg [data-mod="stockp"]{grid-column:span 2}#ovg [data-mod="status"]{grid-column:span 12}
+@media(max-width:1000px){#ovg .tile{grid-column:span 4}#ovg [data-mod="chart"],#ovg [data-mod="latest"],#ovg [data-mod="pending"]{grid-column:span 12}#ovg [data-mod="reviews"],#ovg [data-mod="keys"],#ovg [data-mod="stockp"]{grid-column:span 4}}
+@media(max-width:560px){#ovg{gap:10px}#ovg .tile{grid-column:span 6}#ovg [data-mod="reviews"],#ovg [data-mod="keys"],#ovg [data-mod="stockp"]{grid-column:span 12}}
+#ovbar{position:sticky;top:8px;z-index:30;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 16px}
+#ovbar[hidden]{display:none}#ovbar .sp{flex:1}#ovbar .hint{color:var(--muted);font-size:13px}
+body.ovedit #ovg [data-mod]{outline:2px dashed var(--line);outline-offset:2px;cursor:grab;user-select:none}
+body.ovedit #ovg [data-mod].sel{outline:2px solid var(--accent)}body.ovedit #ovg [data-mod].drag{opacity:.4}body.ovedit #ovg [data-mod].over{outline:2px solid var(--accent);background:var(--accentbg,rgba(52,211,153,.08))}
+body.ovedit #ovg [data-mod] *{pointer-events:none}
 </style></head><body><div class="app">
 <main>
 <div class="quote" id="quote" hidden></div>
@@ -2539,16 +2557,20 @@ body.hide .prog .pn small{filter:none}
 
 <section class="page" id="p-overview">
  <div class="panel welcome dyn" id="welcome"><div class="sk line" style="width:60%"></div></div>
+ <div style="display:flex;justify-content:flex-end;margin:-4px 0 10px"><button class="btn" id="ovedit">Edit overview</button></div>
+ <div id="ovbar" class="panel" hidden></div>
+ <div id="ovg">
  <div class="tiles dyn" id="tiles"><div class="sk tile"></div><div class="sk tile"></div><div class="sk tile"></div><div class="sk tile"></div></div>
  <div class="grid">
-  <div class="panel"><h2><b id="mt1">Sales per month</b> <span id="cur1"></span></h2><div class="chart dyn" id="chart1"><div class="sk box"></div></div></div>
-  <div class="panel"><h2>Latest orders <a href="#orders">View all</a></h2><div class="dyn" id="latest"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div></div>
+  <div class="panel" data-mod="chart"><h2><b id="mt1">Sales per month</b> <span id="cur1"></span></h2><div class="chart dyn" id="chart1"><div class="sk box"></div></div></div>
+  <div class="panel" data-mod="latest"><h2>Latest orders <a href="#orders">View all</a></h2><div class="dyn" id="latest"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div></div>
  </div>
  <div class="grid2">
-  <div class="panel"><h2>Waiting to be completed <a href="#orders">Open</a></h2><div class="dyn" id="pend"><div class="sk line"></div><div class="sk line"></div></div></div>
+  <div class="panel" data-mod="pending"><h2>Waiting to be completed <a href="#orders">Open</a></h2><div class="dyn" id="pend"><div class="sk line"></div><div class="sk line"></div></div></div>
   <div class="grid3 dyn" id="mini" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"><div class="sk tile"></div><div class="sk tile"></div></div>
  </div>
- <div class="panel" data-help="status" style="margin-top:14px"><h2>Eldorado connection <span id="statsum"></span></h2><div class="dyn" id="statbox"><div class="sk line"></div><div class="sk line"></div></div></div>
+ <div class="panel" data-help="status" data-mod="status"><h2>Eldorado connection <span id="statsum"></span></h2><div class="dyn" id="statbox"><div class="sk line"></div><div class="sk line"></div></div></div>
+ </div>
 </section>
 
 <section class="page" id="p-sales">
@@ -3104,6 +3126,15 @@ const DA={
 "against": "mod",
 "same days last month": "samme dage sidste måned",
 "Not enough history yet.": "Ikke nok historik endnu.",
+"Edit overview": "Redigér overblik",
+"drag a module, or tap it and use the arrows": "træk et modul, eller tryk på det og brug pilene",
+"Move earlier": "Flyt tidligere",
+"Move later": "Flyt senere",
+"Remove": "Fjern",
+"Reset": "Nulstil",
+"Hidden modules": "Skjulte moduler",
+"Stock panel": "Lagerpanel",
+"Other currencies": "Andre valutaer",
 "payout due": "udbetaling forfalden",
 "payout around": "udbetaling ca.",
 "Expected payout": "Forventet udbetaling",
@@ -3158,7 +3189,7 @@ const dayLabel2=key=>{const [y,m,d]=key.split("-").map(Number);return new Date(y
 const weekLabel=k=>t("Week")+" "+Number((k||"").split("W")[1]||0);
 
 // ---------- settings (kept on the server per user, mirrored in this browser) ----------
-let PREFS={lang:"",accent:"",currency:"",sound:"ding",gross:null,tax:37,emoji:"",color:"",bg:"",hide:[],menu:[],pins:[],payout:5,notify:{warroom:true,orders:false,reviews:true,keys:true}};
+let PREFS={lang:"",accent:"",currency:"",sound:"ding",gross:null,tax:37,emoji:"",color:"",bg:"",hide:[],menu:[],pins:[],payout:5,ovorder:[],notify:{warroom:true,orders:false,reviews:true,keys:true}};
 const hid=k=>(PREFS.hide||[]).includes(k);
 const BGS=[["","None"],["dots","Dots"],["grid","Grid"],["waves","Waves"],["aurora","Aurora"],["diagonal","Diagonal"]];
 function applyBg(){document.body.dataset.bg=PREFS.bg||"";lsSet("bg",PREFS.bg||"");}
@@ -3174,7 +3205,7 @@ function applyServerPrefs(p){
   const local=k==="currency"?lsGet("cur",""):lsGet(k,"");
   if(p[k])PREFS[k]=p[k];else if(local&&k!=="lang"){PREFS[k]=local;push=true;}else PREFS[k]=k==="lang"?LANG:"";
  }
- PREFS.menu=p.menu||[];PREFS.pins=p.pins||[];PREFS.payout=p.payout==null?5:p.payout;PREFS.tax=p.tax==null?37:p.tax;PREFS.emoji=p.emoji||"";PREFS.color=p.color||"";PREFS.bg=p.bg||"";PREFS.hide=p.hide||[];
+ PREFS.menu=p.menu||[];PREFS.pins=p.pins||[];PREFS.payout=p.payout==null?5:p.payout;PREFS.ovorder=p.ovorder||[];PREFS.tax=p.tax==null?37:p.tax;PREFS.emoji=p.emoji||"";PREFS.color=p.color||"";PREFS.bg=p.bg||"";PREFS.hide=p.hide||[];
  if(p.gross===null||p.gross===undefined){PREFS.gross=GROSS;push=true;}else{PREFS.gross=!!p.gross;GROSS=PREFS.gross;lsSet("gross",GROSS?"1":"0");}
  applyBg();
  if(!p.lang)push=true;
@@ -3266,21 +3297,21 @@ const grCls=p=>p>=0?"up":"down",grTxt=p=>(p>=0?"▲ +":"▼ −")+fmt(Math.abs(p
 function growthBadge(s){const g=growthInfo(s);return g?`<span class="gr ${grCls(g.pct)}" title="${esc(t("compared with the same days last month"))}">${grTxt(g.pct)}</span>`:"";}
 function tiles(d){
  const s=d.sales,cur=esc(shownCur()),r=s.records;
- const tile0=(l,key,v,sub,extra)=>`<div class="tile" data-help="${key}"><div class="l">${l} ${extra||""}</div><div class="v">${cuHtml(key,mv(v))} <small>${cur}</small></div><div class="s">${sub}</div></div>`;
+ const tile0=(mod,l,key,v,sub,extra)=>`<div class="tile" data-mod="${mod}" data-help="${key}"><div class="l">${l} ${extra||""}</div><div class="v">${cuHtml(key,mv(v))} <small>${cur}</small></div><div class="s">${sub}</div></div>`;
  const other=o=>s.fee_percent?` · ${GROSS?t("net"):t("gross")} ${fmt(mv(GROSS?o.amount:o.gross))}`:"";
  const avg=o=>o.orders?amtOf(o)/o.orders:0;
- const tile=(id,...a)=>hid(id)?"":tile0(...a);
+ const tile=(id,...a)=>hid(id)?"":tile0(id,...a);
  let h=tile("today",t("Today"),"t-today",amtOf(s.today),plural(s.today.orders,"order")+other(s.today),recBadge(r.day.record))
   +tile("month",t("This month"),"t-month",amtOf(s.month),plural(s.month.orders,"order")+other(s.month),recBadge(r.month.record)+growthBadge(s))
   +tile("all",t("All time"),"t-all",amtOf(s.all),plural(s.all.orders,"order")+other(s.all))
   +tile("avg",t("Average order"),"t-avg",avg(s.all),t("Today")+": "+(s.today.orders?fmt(mv(avg(s.today))):"-")+" "+cur)
-  +(hid("stock")?"":`<div class="tile" data-help="t-stock"><div class="l">${t("In stock")}</div><div class="v">${cuHtml("t-stock",d.stock.units,0)} <small>${t("units")}</small></div><div class="s">${plural(d.stock.offers.length,"offer")}</div></div>`);
+  +(hid("stock")?"":`<div class="tile" data-mod="stock" data-help="t-stock"><div class="l">${t("In stock")}</div><div class="v">${cuHtml("t-stock",d.stock.units,0)} <small>${t("units")}</small></div><div class="s">${plural(d.stock.offers.length,"offer")}</div></div>`);
  if(d.profit)h+=tile("profit",t("Profit this month"),"t-profit",d.profit.month,t("All time")+": "+fmt(mv(d.profit.all))+" "+cur);
  if(!hid("lastorder")){const lo=d.orders[0],mins=lo?(Date.now()-new Date(lo.time))/6e4:0,cls=!lo?"":mins>360?"bad":mins>120?"warn":"";
-  h+=`<div class="tile" data-help="lastorder"><div class="l">${t("Latest order")}</div><div class="v ${cls}">${lo?esc(waited(lo.time)):"-"}${lo?` <small>${t("ago")}</small>`:""}</div><div class="s">${lo?esc(lo.buyer)+" · "+esc(tm(lo.time)):t("No orders yet.")}</div></div>`;}
+  h+=`<div class="tile" data-mod="lastorder" data-help="lastorder"><div class="l">${t("Latest order")}</div><div class="v ${cls}">${lo?esc(waited(lo.time)):"-"}${lo?` <small>${t("ago")}</small>`:""}</div><div class="s">${lo?esc(lo.buyer)+" · "+esc(tm(lo.time)):t("No orders yet.")}</div></div>`;}
  if(!hid("revrate")){const rv=d.reviews,tot=rv.positive+rv.negative,n=s.all.orders,pc=n?Math.min(100,tot*100/n):null;
-  h+=`<div class="tile" data-help="revrate"><div class="l">${t("Reviews per order")}</div><div class="v">${pc===null?"-":fmt(pc,0)} <small>%</small></div><div class="s">${plural(tot,"review")} ${t("of")} ${plural(n,"order")}</div></div>`;}
- s.others.forEach(o=>{h+=`<div class="tile"><div class="l">${esc(o.currency)} (${t("all time")})</div><div class="v">${fmt(o.all.amount)} <small>${esc(o.currency)}</small></div><div class="s">${plural(o.all.orders,"order")}</div></div>`;});
+  h+=`<div class="tile" data-mod="revrate" data-help="revrate"><div class="l">${t("Reviews per order")}</div><div class="v">${pc===null?"-":fmt(pc,0)} <small>%</small></div><div class="s">${plural(tot,"review")} ${t("of")} ${plural(n,"order")}</div></div>`;}
+ if(!hid("others"))s.others.forEach(o=>{h+=`<div class="tile" data-mod="others"><div class="l">${esc(o.currency)} (${t("all time")})</div><div class="v">${fmt(o.all.amount)} <small>${esc(o.currency)}</small></div><div class="s">${plural(o.all.orders,"order")}</div></div>`;});
  $("tiles").innerHTML=h;runCountUps($("tiles"));
 }
 function taxpot(d){
@@ -3307,6 +3338,7 @@ function statusPanel(d){
 }
 function applyHides(){
  [["chart1","chart"],["latest","latest"],["pend","pending"]].forEach(([id,k])=>{const p=$(id).closest(".panel");if(p)p.style.display=hid(k)?"none":"";});
+ const st=document.querySelector('#ovg [data-mod="status"]');if(st)st.style.display=hid("status")?"none":"";
 }
 function niceStep(peak){for(const s of [5,10,20,25,50,100,200,250,500,1000,2000,2500,5000,10000,20000,50000]) if(peak/s<=4)return s;return 100000;}
 const monthTitle=()=>GROSS?t("Gross per month"):t("Net per month");
@@ -3362,9 +3394,9 @@ function mini(d){
  const r=d.reviews,tot=r.positive+r.negative,pct=tot?Math.round(r.positive*100/tot):null,k=d.keys,low=k.left<=10;
  const lowStock=d.stock.offers.filter(o=>o.quantity<=5).length;
  $("mini").innerHTML=
-  (hid("reviews")?"":`<div class="panel" data-help="mini-rev"><h2>${t("Reviews")} <a href="#reviews">${t("Open")}</a></h2><div class="big">${pct===null?"-":pct+"%"}</div><div class="muted">${r.positive} ${t("good")} · ${r.negative} ${t("bad")}</div></div>`)
-  +(hid("keys")?"":`<div class="panel" data-help="mini-keys"><h2>${t("Keys left")} <a href="#keys">${t("Open")}</a></h2><div class="big">${fmt(k.left,0)}</div><div style="margin-top:4px">${low?`<span class="pill ${k.left===0?"bad":"warn"}">${k.left===0?t("Out of keys"):t("Running low")}</span>`:`<span class="muted">${fmt(k.used,0)} ${t("used so far")}</span>`}</div><div class="muted" style="font-size:12.5px;margin-top:6px">${fcText(k)}</div></div>`)
-  +`<div class="panel" data-help="mini-stock"><h2>${t("Stock")} <a href="#stock">${t("Open")}</a></h2><div class="big">${fmt(d.stock.units,0)}</div><div style="margin-top:4px">${lowStock?`<span class="pill warn">${plural(lowStock,"offer")} ${t("low")}</span>`:`<span class="muted">${t("All offers stocked")}</span>`}</div></div>`;
+  (hid("reviews")?"":`<div class="panel" data-mod="reviews" data-help="mini-rev"><h2>${t("Reviews")} <a href="#reviews">${t("Open")}</a></h2><div class="big">${pct===null?"-":pct+"%"}</div><div class="muted">${r.positive} ${t("good")} · ${r.negative} ${t("bad")}</div></div>`)
+  +(hid("keys")?"":`<div class="panel" data-mod="keys" data-help="mini-keys"><h2>${t("Keys left")} <a href="#keys">${t("Open")}</a></h2><div class="big">${fmt(k.left,0)}</div><div style="margin-top:4px">${low?`<span class="pill ${k.left===0?"bad":"warn"}">${k.left===0?t("Out of keys"):t("Running low")}</span>`:`<span class="muted">${fmt(k.used,0)} ${t("used so far")}</span>`}</div><div class="muted" style="font-size:12.5px;margin-top:6px">${fcText(k)}</div></div>`)
+  +(hid("stockp")?"":`<div class="panel" data-mod="stockp" data-help="mini-stock"><h2>${t("Stock")} <a href="#stock">${t("Open")}</a></h2><div class="big">${fmt(d.stock.units,0)}</div><div style="margin-top:4px">${lowStock?`<span class="pill warn">${plural(lowStock,"offer")} ${t("low")}</span>`:`<span class="muted">${t("All offers stocked")}</span>`}</div></div>`);
 }
 
 // ================= sales =================
@@ -3496,7 +3528,7 @@ function render(d){
  if(!prefsApplied){prefsApplied=true;applyServerPrefs(d.prefs);translateStatic();setTitle();settingsUi();}
  const q=$("quote");q.hidden=!d.quote;q.textContent=d.quote||"";
  $("who").textContent=d.user.name;$("role").textContent=t(d.user.role==="admin"?"admin":"viewer");$("av").textContent=d.user.name.slice(0,1);
- curUi();detectEvents(d);newsNav();once("menu",[PREFS.menu,PREFS.pins,isAdmin],applyMenu);once("tax",[d.profit,PREFS.tax,PREFS.hide,K0()],()=>taxpot(d));
+ curUi();detectEvents(d);newsNav();once("menu",[PREFS.menu,PREFS.pins,isAdmin],applyMenu);once("ovs",[PREFS.ovorder],ovStyle);once("tax",[d.profit,PREFS.tax,PREFS.hide,K0()],()=>taxpot(d));
  const p=page(),K=[GROSS,shownCur(),HIDE,LANG];
  if(p==="overview"){applyHides();once("status",[d.status,K],()=>statusPanel(d));once("welcome",[d.sales,d.reviews,d.pending.n,d.keys.left,K],()=>welcome(d));
   once("tiles",[d.sales,d.stock.units,d.stock.offers.length,d.profit,d.orders[0],d.reviews,PREFS.hide,K],()=>tiles(d));$("cur1").textContent=shownCur()+" · "+feeNote();$("mt1").textContent=monthTitle();
@@ -3776,7 +3808,7 @@ function settingsUi(){
  $("accpick").onchange=e=>setAccent(e.target.value);
  curUi();tglUi();menuUi();if(document.activeElement!==$("payout"))$("payout").value=PREFS.payout==null?5:PREFS.payout;
  $("bgSeg").innerHTML=BGS.map(b=>`<button type="button" class="chip${(PREFS.bg||"")===b[0]?" on":""}" data-bg="${b[0]}">${esc(t(b[1]))}</button>`).join("");
- const defs=[["today","Today"],["month","This month"],["all","All time"],["avg","Average order"],["stock","In stock"],["profit","Profit this month",1],["taxpot","Tax pot",1],["lastorder","Latest order"],["revrate","Reviews per order"],["chart","Sales per month"],["latest","Latest orders"],["pending","Waiting to be completed"],["reviews","Reviews"],["keys","Keys left"]];
+ const defs=[["today","Today"],["month","This month"],["all","All time"],["avg","Average order"],["stock","In stock"],["profit","Profit this month",1],["taxpot","Tax pot",1],["lastorder","Latest order"],["revrate","Reviews per order"],["chart","Sales per month"],["latest","Latest orders"],["pending","Waiting to be completed"],["reviews","Reviews"],["keys","Keys left"],["stockp","Stock panel"],["status","Eldorado connection"],["others","Other currencies"]];
  $("tilesel").innerHTML=defs.filter(x=>!x[2]||isAdmin).map(x=>`<label class="tgl"><div>${esc(t(x[1]))}</div><input type="checkbox" data-tile="${x[0]}"${hid(x[0])?"":" checked"}></label>`).join("");
  $("profbox").style.display=isAdmin?"":"none";$("taxbox").style.display=isAdmin?"":"none";
  if(document.activeElement!==$("pemoji"))$("pemoji").value=PREFS.emoji||"";
@@ -4036,6 +4068,40 @@ async function refreshAll(){const p=$("ptr");p.classList.add("spin");p.style.top
  document.addEventListener("touchend",()=>{if(!st)return;const go=st.dy>110;st=null;p.style.transition="";
   if(go)refreshAll();else p.style.top="";});
 })();
+
+// ================= overview editing =================
+const OV_DEFAULT=["today","month","all","avg","stock","profit","lastorder","revrate","others","chart","latest","pending","reviews","keys","stockp","status"];
+const OV_NAMES={today:"Today",month:"This month",all:"All time",avg:"Average order",stock:"In stock",profit:"Profit this month",lastorder:"Latest order",revrate:"Reviews per order",others:"Other currencies",chart:"Sales per month",latest:"Latest orders",pending:"Waiting to be completed",reviews:"Reviews",keys:"Keys left",stockp:"Stock panel",status:"Eldorado connection"};
+let OVEDIT=false,OVSEL="";
+function ovOrder(){const o=(PREFS.ovorder||[]).filter(x=>OV_DEFAULT.includes(x));return [...o,...OV_DEFAULT.filter(x=>!o.includes(x))];}
+function ovStyle(){let st=$("ovstyle");if(!st){st=document.createElement("style");st.id="ovstyle";document.head.appendChild(st);}
+ st.textContent=ovOrder().map((k,i)=>`#ovg [data-mod="${k}"]{order:${i+1}}`).join("");}
+function ovPresent(){return ovOrder().filter(k=>document.querySelector(`#ovg [data-mod="${k}"]`)&&!hid(k));}
+function ovMove(k,to){const o=ovOrder(),from=o.indexOf(k);if(from<0||k===to)return;o.splice(from,1);let i=o.indexOf(to);if(i<0)return;if(from<=o.indexOf(to)+0&&false)i++;
+ o.splice(from<ovOrder().indexOf(to)?i+1:i,0,k);PREFS.ovorder=o;savePrefs();ovStyle();ovUi();}
+function ovStep(k,dir){const v=ovPresent(),i=v.indexOf(k),n=v[i+dir];if(i<0||!n)return;ovMove(k,n);}
+function ovUi(){const bar=$("ovbar");document.body.classList.toggle("ovedit",OVEDIT);
+ if(!OVEDIT){bar.hidden=true;document.querySelectorAll("#ovg [data-mod]").forEach(e=>{e.removeAttribute("draggable");e.classList.remove("sel","drag","over");});$("ovedit").hidden=false;return;}
+ $("ovedit").hidden=true;bar.hidden=false;
+ document.querySelectorAll("#ovg [data-mod]").forEach(e=>{e.draggable=true;e.classList.toggle("sel",e.dataset.mod===OVSEL);});
+ const rem=OV_DEFAULT.filter(k=>hid(k)&&(k!=="profit"||isAdmin)&&(k!=="others"||true));
+ bar.innerHTML=`<b>${t("Edit overview")}</b><span class="hint">${OVSEL?esc(t(OV_NAMES[OVSEL]||OVSEL))+": ":""}${t("drag a module, or tap it and use the arrows")}</span><span class="sp"></span>`
+  +(OVSEL?`<button class="btn" data-ovs="-1" aria-label="${t("Move earlier")}">‹</button><button class="btn" data-ovs="1" aria-label="${t("Move later")}">›</button><button class="btn" data-ovrm="1">${t("Remove")}</button>`:"")
+  +`<button class="btn" id="ovreset">${t("Reset")}</button><button class="btn pri" id="ovdone">${t("Done")}</button>`
+  +(rem.length?`<div style="flex-basis:100%;display:flex;flex-wrap:wrap;gap:6px;align-items:center"><span class="hint">${t("Hidden modules")}:</span>${rem.map(k=>`<button class="chip" data-ovadd="${k}">+ ${esc(t(OV_NAMES[k]||k))}</button>`).join("")}</div>`:"");}
+$("ovedit").onclick=()=>{OVEDIT=true;OVSEL="";ovUi();};
+$("ovbar").onclick=e=>{const b=e.target.closest("button");if(!b)return;
+ if(b.id==="ovdone"){OVEDIT=false;OVSEL="";ovUi();return;}
+ if(b.id==="ovreset"){PREFS.ovorder=[];PREFS.hide=(PREFS.hide||[]).filter(x=>!OV_DEFAULT.includes(x)||x==="profit"&&false);savePrefs();ovStyle();rerender();setTimeout(ovUi,50);return;}
+ if(b.dataset.ovs){ovStep(OVSEL,parseInt(b.dataset.ovs,10));return;}
+ if(b.dataset.ovrm){PREFS.hide=[...new Set([...(PREFS.hide||[]),OVSEL])];OVSEL="";savePrefs();rerender();setTimeout(ovUi,50);return;}
+ if(b.dataset.ovadd){PREFS.hide=(PREFS.hide||[]).filter(x=>x!==b.dataset.ovadd);savePrefs();rerender();setTimeout(ovUi,50);}};
+$("ovg").addEventListener("click",e=>{if(!OVEDIT)return;e.preventDefault();e.stopPropagation();const m=e.target.closest("[data-mod]");OVSEL=m&&m.dataset.mod!==OVSEL?m.dataset.mod:"";ovUi();},true);
+$("ovg").addEventListener("dragstart",e=>{const m=e.target.closest&&e.target.closest("[data-mod]");if(!OVEDIT||!m){return;}OVSEL=m.dataset.mod;e.dataTransfer.effectAllowed="move";try{e.dataTransfer.setData("text/plain",OVSEL);}catch(x){}m.classList.add("drag");});
+$("ovg").addEventListener("dragover",e=>{if(!OVEDIT)return;const m=e.target.closest("[data-mod]");if(!m)return;e.preventDefault();document.querySelectorAll("#ovg .over").forEach(x=>{if(x!==m)x.classList.remove("over");});if(m.dataset.mod!==OVSEL)m.classList.add("over");});
+$("ovg").addEventListener("drop",e=>{if(!OVEDIT)return;const m=e.target.closest("[data-mod]");e.preventDefault();if(m&&OVSEL)ovMove(OVSEL,m.dataset.mod);});
+$("ovg").addEventListener("dragend",()=>{document.querySelectorAll("#ovg .drag,#ovg .over").forEach(x=>x.classList.remove("drag","over"));});
+new MutationObserver(()=>{if(OVEDIT)document.querySelectorAll("#ovg [data-mod]").forEach(e=>{if(e.draggable!==true)e.draggable=true;if(e.classList.contains("sel")!==(e.dataset.mod===OVSEL))e.classList.toggle("sel",e.dataset.mod===OVSEL);});}).observe($("ovg"),{childList:true,subtree:true});
 
 // ---------- War-Room ----------
 let wrStyles={},wrPeople=[];let wrLast=0,wrRev=-1,wrMsgs=[],wrSeen=null,wrMe="",wrStarted=false,wrEdit=null,wrSure=null,wrUnreadTitle=0;
