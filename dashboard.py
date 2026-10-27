@@ -79,7 +79,7 @@ NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys
 BACKGROUNDS = ("", "dots", "grid", "waves", "aurora", "diagonal")
 DEFAULT_PREFS = {"lang": "", "accent": "", "currency": "", "sound": "ding", "gross": None, "tax": 37,
                  "emoji": "", "color": "", "bg": "", "hide": [], "menu": [], "pins": [], "payout": 5, "ovorder": [],
-                 "notify": {"warroom": True, "orders": False, "reviews": True, "keys": True}}
+                 "notify": {"warroom": True, "orders": True, "reviews": True, "keys": True}}
 
 _mem = {}                      # demo mode keeps its small data files in memory only
 _file_lock = threading.RLock()
@@ -3255,7 +3255,7 @@ const dayLabel2=key=>{const [y,m,d]=key.split("-").map(Number);return new Date(y
 const weekLabel=k=>t("Week")+" "+Number((k||"").split("W")[1]||0);
 
 // ---------- settings (kept on the server per user, mirrored in this browser) ----------
-let PREFS={lang:"",accent:"",currency:"",sound:"ding",gross:null,tax:37,emoji:"",color:"",bg:"",hide:[],menu:[],pins:[],payout:5,ovorder:[],notify:{warroom:true,orders:false,reviews:true,keys:true}};
+let PREFS={lang:"",accent:"",currency:"",sound:"ding",gross:null,tax:37,emoji:"",color:"",bg:"",hide:[],menu:[],pins:[],payout:5,ovorder:[],notify:{warroom:true,orders:true,reviews:true,keys:true}};
 const hid=k=>(PREFS.hide||[]).includes(k);
 const BGS=[["","None"],["dots","Dots"],["grid","Grid"],["waves","Waves"],["aurora","Aurora"],["diagonal","Diagonal"]];
 function applyBg(){document.body.dataset.bg=PREFS.bg||"";lsSet("bg",PREFS.bg||"");}
