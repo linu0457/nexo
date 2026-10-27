@@ -1555,6 +1555,43 @@ def api_push_subscribe():
     return jsonify(ok=True)
 
 
+@app.route("/api/push/test", methods=["POST"])
+def api_push_test():
+    """Sends a test notification to the logged-in person's own devices and says what happened per device."""
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    if DEMO:
+        return jsonify(ok=True, devices=1, results=["demo: nothing is sent"])
+    if not push_available():
+        return jsonify(ok=False, error="pywebpush is not installed on the VPS. Run opdater.bat and restart.")
+    from pywebpush import WebPushException, webpush
+    me = current_user()["name"]
+    with _push_lock:
+        mine = [s for s in load_subs() if s["user"] == me]
+    if not mine:
+        return jsonify(ok=False, error="No device is registered for you. Turn notifications on from the installed app.")
+    lang = prefs_of(me)["lang"] or "da"
+    payload = json.dumps({"title": "Nexo-Shop", "body": "Test: det virker!" if lang == "da" else "Test: it works!", "url": "/#settings", "tag": "test"})
+    results, dead = [], []
+    for s in mine:
+        host = re.sub(r"^https://([^/]+)/.*$", r"\1", s["sub"]["endpoint"])
+        try:
+            webpush(subscription_info=s["sub"], data=payload, vapid_private_key=str(VAPID_FILE), vapid_claims={"sub": PUSH_CONTACT}, ttl=600, timeout=10)
+            results.append(f"{host}: sent")
+        except WebPushException as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            results.append(f"{host}: refused ({code or type(e).__name__})")
+            if code in (404, 410):
+                dead.append(s["sub"]["endpoint"])
+        except Exception as e:
+            results.append(f"{host}: error ({type(e).__name__})")
+    if dead:
+        with _push_lock:
+            save_subs([s for s in load_subs() if s["sub"]["endpoint"] not in dead])
+    return jsonify(ok=any(r.endswith("sent") for r in results), devices=len(mine), results=results)
+
+
 @app.route("/api/push/unsubscribe", methods=["POST"])
 def api_push_unsubscribe():
     bad = api_guard(admin=True)
@@ -2724,7 +2761,7 @@ body.ovedit #ovg [data-mod] *{pointer-events:none}
    <div class="tgl"><div>New orders</div><input type="checkbox" data-n="orders"></div>
    <div class="tgl"><div>Bad reviews</div><input type="checkbox" data-n="reviews"></div>
    <div class="tgl"><div>Keys running low<small>10 or fewer keys left, and when they run out.</small></div><input type="checkbox" data-n="keys"></div>
-   <div class="row" style="margin-top:12px"><button class="btn" id="setnote" type="button">Notifications: off</button></div>
+   <div class="row" style="margin-top:12px"><button class="btn" id="setnote" type="button">Notifications: off</button> <button class="btn" id="pushtest" type="button">Send test notification</button></div>
    <div class="muted" style="font-size:12.5px">The switch above turns notifications on for this device. The boxes decide which ones you get.</div>
   </div>
   <div class="panel" style="margin-bottom:14px" id="profbox"><h2>Profile <span>admins</span></h2>
@@ -3154,6 +3191,16 @@ const DA={
 "Hidden modules": "Skjulte moduler",
 "Stock panel": "Lagerpanel",
 "Other currencies": "Andre valutaer",
+"Send test notification": "Send testbesked",
+"Test notification": "Testbesked",
+"Sent. It should arrive in a few seconds, also if the app is closed.": "Sendt. Den bør komme om få sekunder, også når appen er lukket.",
+"On iPhone, open the app from the home screen icon first.": "På iPhone: åbn først appen fra ikonet på hjemmeskærmen.",
+"This browser cannot receive notifications when closed.": "Denne browser kan ikke modtage beskeder, når den er lukket.",
+"The server cannot send notifications yet": "Serveren kan ikke sende beskeder endnu",
+"The server did not accept this device": "Serveren accepterede ikke denne enhed",
+"Could not register this device": "Kunne ikke registrere denne enhed",
+"pywebpush is not installed on the VPS. Run opdater.bat and restart.": "pywebpush er ikke installeret på VPS'en. Kør opdater.bat og start igen.",
+"No device is registered for you. Turn notifications on from the installed app.": "Ingen enhed er registreret til dig. Slå beskeder til fra den installerede app.",
 "payout due": "udbetaling forfalden",
 "payout around": "udbetaling ca.",
 "Expected payout": "Forventet udbetaling",
@@ -4142,19 +4189,19 @@ function playSound(name,force){
 function ding(){if(PREFS.sound==="none")return;playSound(PREFS.sound||"ding");}
 const iosWeb=/iphone|ipad|ipod/i.test(navigator.userAgent)&&!(window.matchMedia("(display-mode: standalone)").matches||navigator.standalone===true);
 const notifyOK=()=>typeof Notification!=="undefined"&&window.isSecureContext;
-let pushOn=false;
+let pushOn=false,pushErr="";
 const b64u8=s=>{s=s.replace(/-/g,"+").replace(/_/g,"/");s+="=".repeat((4-s.length%4)%4);const r=atob(s);return Uint8Array.from(r,c=>c.charCodeAt(0));};
 async function pushSubscribe(){
  pushOn=false;
  try{
-  if(!("serviceWorker" in navigator)||!("PushManager" in window))return;
-  const k=await (await fetch("/api/push/key")).json();if(!k.enabled)return;
+  if(!("serviceWorker" in navigator)||!("PushManager" in window)){pushErr=iosWeb?t("On iPhone, open the app from the home screen icon first."):t("This browser cannot receive notifications when closed.");return;}
+  const k=await (await fetch("/api/push/key")).json();if(!k.enabled){pushErr=k.reason?t("The server cannot send notifications yet")+" ("+k.reason+")":t("The server cannot send notifications yet");return;}
   const reg=await navigator.serviceWorker.ready;let sub=await reg.pushManager.getSubscription();
   if(sub){const cur=sub.options&&sub.options.applicationServerKey;
    if(cur&&btoa(String.fromCharCode(...new Uint8Array(cur))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"")!==k.key){await sub.unsubscribe();sub=null;}}
   if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64u8(k.key)});
-  const r=await post("/api/push/subscribe",{subscription:sub.toJSON()});pushOn=r.ok;
- }catch(e){pushOn=false;}
+  const r=await post("/api/push/subscribe",{subscription:sub.toJSON()});pushOn=r.ok;if(!r.ok)pushErr=t("The server did not accept this device");else pushErr="";
+ }catch(e){pushOn=false;pushErr=t("Could not register this device")+" ("+(e&&e.name||"error")+")";}
  tglUi();
 }
 async function pushUnsubscribe(){
@@ -4179,9 +4226,12 @@ async function toggleNotifications(){
  let p=Notification.permission;if(p==="default")p=await Notification.requestPermission();
  noteOn=p==="granted";lsSet("wr_note",noteOn?"1":"0");tglUi();
  if(noteOn){await pushSubscribe();
+  if(!pushOn&&pushErr)toast(t("Notifications"),pushErr);
   try{const reg=await navigator.serviceWorker.getRegistration();const o={body:pushOn?t("You will get notifications even when the app is closed."):t("Notifications are on while the page is open."),icon:"/icon-192.png"};
    if(reg)await reg.showNotification("War-Room",o);else new Notification("War-Room",o);}catch(e){}}
 }
+$("pushtest").onclick=async()=>{const b=$("pushtest");b.disabled=true;try{const r=await post("/api/push/test",{});const j=await r.json();
+ toast(t("Test notification"),j.ok?t("Sent. It should arrive in a few seconds, also if the app is closed.")+" "+(j.results||[]).join(", "):(j.error?t(j.error):"")+" "+(j.results||[]).join(", "));}catch(e){toast(t("Test notification"),t("Could not reach the server."));}b.disabled=false;};
 $("tnote").onclick=toggleNotifications;$("setnote").onclick=toggleNotifications;
 document.addEventListener("pointerdown",()=>audio(),{once:true});
 document.addEventListener("keydown",()=>audio(),{once:true});
