@@ -2190,7 +2190,7 @@ body.hide .tip{display:none}
 .cal .cd{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;min-height:62px;border-radius:10px;border:1px solid transparent;background:color-mix(in srgb,var(--accent) calc(var(--lv,0)*34%),var(--panel2));color:var(--ink);font:inherit;cursor:pointer;padding:4px 2px}
 .cal .cd.off{background:none;cursor:default;pointer-events:none}
 .cal .cd i{font-style:normal;font-size:11.5px;color:var(--ink2);position:absolute;top:4px;left:7px}
-.cal .cd b{font-size:13px;margin-top:8px}.cal .cd s{text-decoration:none;font-size:10.5px;color:var(--muted)}
+.cal .cd b{font-size:13px;margin-top:8px;text-align:center;line-height:1.15}.cal .cd b em{font-style:normal;font-weight:500;font-size:9.5px;color:var(--muted);margin-left:3px}.cal .cd s{text-decoration:none;font-size:10.5px;color:var(--muted)}
 .cal .cd.today{border-color:var(--accent)}.cal .cd.sel{outline:2px solid var(--accent);outline-offset:1px}
 .cal .cd.best:after{content:"\2605";position:absolute;top:3px;right:6px;color:var(--amber);font-size:12px}
 .cal .cd:hover{border-color:var(--muted)}
@@ -2236,7 +2236,7 @@ body.hide .tip{display:none}
 .nv{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
 .relnote{border-left:3px solid var(--accent);padding:2px 0 2px 14px;margin:0 0 22px}.relnote h3{margin:0 0 6px;font-size:15px}.relnote ul{margin:0;padding-left:18px}.relnote li{margin:3px 0}
 .bigstat{display:flex;gap:28px;flex-wrap:wrap}
-@media(max-width:820px){.toasts{bottom:84px}.drawer{width:100vw}.quote{margin:-4px 0 12px}.cal .cd{min-height:54px}.cal .cd s{display:none}.header-tools .seg button{padding:6px 9px}}
+@media(max-width:820px){.toasts{bottom:84px}.drawer{width:100vw}.quote{margin:-4px 0 12px}.cal .cd{min-height:54px}.cal .cd s{display:none}.cal .cd b em{display:block;margin:1px 0 0;font-size:8.5px}.header-tools .seg button{padding:6px 9px}}
 @media (prefers-reduced-motion:reduce){.sk,.drawer,.toast2{animation:none;transition:none}}
 
 /* round 2 */
@@ -3089,7 +3089,7 @@ function calendar(d){
  for(let i=0;i<first;i++)h+=`<div class="cd off"></div>`;
  for(let i=1;i<=dim;i++){const k=calMonth+"-"+String(i).padStart(2,"0"),x=days[k],a=x?dayAmt(x):0;
   const cls=["cd",k===s.date?"today":"",k===selDay?"sel":"",s.records.day.key===k?"best":""].join(" ");
-  h+=`<button class="${cls}" data-day="${k}" style="--lv:${max?(a/max).toFixed(2):0}" aria-label="${esc(dayLabel2(k))}"><i>${i}</i><b>${x?fmt(mv(a),0):""}</b><s>${x?x.n:""}</s></button>`;}
+  h+=`<button class="${cls}" data-day="${k}" style="--lv:${max?(a/max).toFixed(2):0}" aria-label="${esc(dayLabel2(k))}"><i>${i}</i><b>${x?fmt(mv(a),0)+"<em>"+esc(shownCur())+"</em>":""}</b><s>${x?x.n:""}</s></button>`;}
  $("cal").innerHTML=h;
 }
 async function loadDay(date){
