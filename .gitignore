@@ -24,3 +24,7 @@ seen_orders.json
 offer_dump.json
 history.json
 history_backfill.done
+backups/
+unitcosts.json
+dashboard.log
+dashboard.old.log

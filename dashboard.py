@@ -25,6 +25,7 @@ Optional in .env:
   SHOP_NAME, TIMEZONE, STOCK_CATEGORIES, STOCK_HIDE   (same as the other scripts)
 """
 import argparse
+import fnmatch
 import base64
 import getpass
 import hashlib
@@ -38,6 +39,7 @@ import sys
 import threading
 import time
 import uuid
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -74,7 +76,7 @@ PRESENCE_FILE, DEVICES_FILE = Path("presence.json"), Path("devices.json")
 CURRENCIES = ("DKK", "USD", "EUR")
 SOUNDS = ("ding", "bell", "pop", "chime", "none")
 NOTIFY_KINDS = ("warroom", "orders", "reviews", "keys")
-OVERVIEW_TILES = ("today", "month", "all", "avg", "stock", "profit", "taxpot", "lastorder", "revrate", "pending", "reviews", "keys", "latest", "chart", "stockp", "status", "others")
+OVERVIEW_TILES = ("today", "month", "all", "avg", "stock", "profit", "taxpot", "lastorder", "revrate", "pending", "reviews", "keys", "latest", "chart", "stockp", "status", "others", "stockval")
 NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys", "warroom", "mindmap", "profit", "programs", "users", "settings", "news")
 BACKGROUNDS = ("", "dots", "grid", "waves", "aurora", "diagonal")
 DEFAULT_PREFS = {"lang": "", "accent": "", "currency": "", "sound": "ding", "gross": None, "tax": 37,
@@ -501,9 +503,9 @@ def refresh_orders(client):
 
 
 def refresh_stock(client):
-    from stock_board import CATEGORIES, ENABLED, fetch_offers
+    from stock_board import CATEGORIES, fetch_offers
     offers = []
-    for key in ENABLED:
+    for key in CATEGORIES:            # items AND accounts, whatever the Discord stock board is set to show
         for o in fetch_offers(client, CATEGORIES[key]):
             offers.append({"title": o.get("offerTitle") or o.get("gameCategoryTitle") or "?",
                            "category": CATEGORIES[key]["name"], "quantity": o.get("quantity") or 0,
@@ -1094,6 +1096,8 @@ def api_data():
     d["prefs"] = prefs_of(u["name"])
     if u["role"] == "admin":
         d["profit"] = profit_brief()
+        d["unitcosts"] = load_unitcosts()
+        d["alarms"] = prog_alarms()
     # nothing new since the last answer: send a tiny reply instead of the whole page of numbers again
     h = hashlib.md5(json.dumps({k: v for k, v in d.items() if k != "updated"}, sort_keys=True).encode()).hexdigest()[:16]
     if request.args.get("h") == h:
@@ -2147,6 +2151,181 @@ def api_changelog():
     return jsonify(rows=_chlog["rows"], head=_chlog["head"])
 
 
+# ---------- unit costs, backups and alarms ----------
+
+UCOST_FILE = Path("unitcosts.json")
+_ucost_lock = threading.Lock()
+
+
+def load_unitcosts():
+    if DEMO:
+        return dict(_demo_ucost)
+    try:
+        j = json.loads(UCOST_FILE.read_text(encoding="utf-8"))
+        return {str(k): float(v) for k, v in j.items() if isinstance(v, (int, float))} if isinstance(j, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+@app.route("/api/unitcost", methods=["PUT"])
+def api_unitcost():
+    """What one unit of an offer cost you to buy in (admin). cost = null removes it."""
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    j = request.get_json(silent=True) or {}
+    title = str(j.get("title", "")).strip()[:200]
+    if not title:
+        return jsonify(error="Missing title."), 400
+    cost = j.get("cost")
+    with _ucost_lock:
+        c = load_unitcosts()
+        if cost is None or cost == "":
+            c.pop(title, None)
+        elif isinstance(cost, (int, float)) and not isinstance(cost, bool) and 0 <= cost <= 1e7:
+            c[title] = round(float(cost), 4)
+        else:
+            return jsonify(error="Cost must be a number."), 400
+        if not DEMO:
+            tmp = UCOST_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(c, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(UCOST_FILE)
+        else:
+            _demo_ucost.clear()
+            _demo_ucost.update(c)
+    return jsonify(ok=True)
+
+
+_demo_ucost = {}
+
+BACKUP_DIR = Path(__file__).resolve().parent / "backups"
+BACKUP_KEEP = 14
+# Your data. Secrets (.env, *.key, *.pem) are deliberately NOT included, so a backup is safe to download.
+BACKUP_NAMES = ("ledger.json", "orders_db.json", "users.json", "devices.json", "prefs.json", "costs.json", "unitcosts.json",
+                "push_subs.json", "warroom.json", "mindmap.json", "refill_log.json", "history.json", "history_backfill.done",
+                "ignore_orders.txt", "additional_info.txt")
+BACKUP_GLOBS = ("keys*.txt", "*_state.json")
+BACKUP_RE = re.compile(r"^backup-\d{4}-\d{2}-\d{2}_\d{6}(-manual|-safety)?\.zip$")
+_backup_lock = threading.Lock()
+
+
+def _backup_members():
+    base = Path(__file__).resolve().parent
+    out = {n for n in BACKUP_NAMES if (base / n).is_file()}
+    for g in BACKUP_GLOBS:
+        out |= {p.name for p in base.glob(g) if p.is_file()}
+    return sorted(out)
+
+
+def _backup_allowed(name):
+    return name in BACKUP_NAMES or any(fnmatch.fnmatch(name, g) for g in BACKUP_GLOBS)
+
+
+def make_backup(tag=""):
+    base = Path(__file__).resolve().parent
+    with _backup_lock:
+        BACKUP_DIR.mkdir(exist_ok=True)
+        name = "backup-" + datetime.now().strftime("%Y-%m-%d_%H%M%S") + (f"-{tag}" if tag else "") + ".zip"
+        tmp = BACKUP_DIR / (name + ".tmp")
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            for n in _backup_members():
+                z.write(base / n, n)
+        tmp.replace(BACKUP_DIR / name)
+        # keep the newest BACKUP_KEEP automatic/manual ones (safety copies from a restore are kept a bit longer)
+        old = sorted((p for p in BACKUP_DIR.glob("backup-*.zip") if BACKUP_RE.match(p.name)), key=lambda p: p.name, reverse=True)
+        for p in old[BACKUP_KEEP + 5:]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    return name
+
+
+def list_backups():
+    if not BACKUP_DIR.is_dir():
+        return []
+    rows = []
+    for p in sorted(BACKUP_DIR.glob("backup-*.zip"), reverse=True):
+        if BACKUP_RE.match(p.name):
+            st = p.stat()
+            rows.append({"name": p.name, "size": st.st_size, "time": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat()})
+    return rows
+
+
+def _backup_loop():
+    """Once a day: if there is no backup from today yet, take one. Checked every 10 minutes (also right at start)."""
+    while True:
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            if not any(r["name"].startswith("backup-" + today) for r in list_backups()):
+                print("Backup:", make_backup(), flush=True)
+        except Exception as e:
+            print("Backup failed:", type(e).__name__, e, flush=True)
+        time.sleep(600)
+
+
+@app.route("/api/backups", methods=["GET", "POST"])
+def api_backups():
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    if request.method == "POST":
+        try:
+            make_backup("manual")
+        except OSError as e:
+            return jsonify(error=f"Could not write the backup: {type(e).__name__}"), 500
+    return jsonify(backups=list_backups()[:20], keep=BACKUP_KEEP)
+
+
+@app.route("/api/backups/<name>")
+def api_backup_get(name):
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    if not BACKUP_RE.match(name) or not (BACKUP_DIR / name).is_file():
+        return jsonify(error="No such backup."), 404
+    return Response((BACKUP_DIR / name).read_bytes(), mimetype="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.route("/api/backups/restore", methods=["POST"])
+def api_backup_restore():
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    name = str((request.get_json(silent=True) or {}).get("name", ""))
+    if not BACKUP_RE.match(name) or not (BACKUP_DIR / name).is_file():
+        return jsonify(error="No such backup."), 404
+    base = Path(__file__).resolve().parent
+    try:
+        safety = make_backup("safety")           # whatever is there now can still be got back
+        restored = []
+        with zipfile.ZipFile(BACKUP_DIR / name) as z:
+            for n in z.namelist():
+                if "/" in n or "\\" in n or not _backup_allowed(n):
+                    continue
+                tmp = base / (n + ".restore")
+                tmp.write_bytes(z.read(n))
+                tmp.replace(base / n)
+                restored.append(n)
+    except (OSError, zipfile.BadZipFile) as e:
+        return jsonify(error=f"Restore failed: {type(e).__name__}"), 500
+    return jsonify(ok=True, restored=len(restored), safety=safety)
+
+
+def prog_alarms():
+    """Programs the dashboard looks after that are down right now (shown as a big red bar)."""
+    out = []
+    if not _prog_managed:
+        return out
+    for p in list(_progs.values()):
+        if p.fake:
+            continue
+        if p.state in ("crashed", "missing"):
+            out.append({"name": p.name, "state": p.state})
+    return out
+
+
 # ---------- app (PWA): manifest, icons, service worker ----------
 
 
@@ -2616,7 +2795,16 @@ body.hide .prog .pn small{filter:none}
 body.ovedit #ovg [data-mod]{outline:2px dashed var(--line);outline-offset:2px;cursor:grab;user-select:none}
 body.ovedit #ovg [data-mod].sel{outline:2px solid var(--accent)}body.ovedit #ovg [data-mod].drag{opacity:.4}body.ovedit #ovg [data-mod].over{outline:2px solid var(--accent);background:var(--accentbg,rgba(52,211,153,.08))}
 body.ovedit #ovg [data-mod] *{pointer-events:none}
-</style></head><body><div class="app">
+
+/* alarm bar + stock value + backups */
+#alarm{position:fixed;top:0;left:0;right:0;z-index:300;background:#dc2626;color:#fff;text-align:center;font-weight:900;font-size:clamp(20px,4.2vw,34px);letter-spacing:.5px;padding:12px 16px;cursor:pointer;box-shadow:0 6px 24px rgba(220,38,38,.55);animation:alarmp 1.6s ease-in-out infinite}
+#alarm small{display:block;font-size:13px;font-weight:600;letter-spacing:0;opacity:.95;margin-top:2px}#alarm[hidden]{display:none}
+body.alarmon .app{padding-top:var(--alh,78px)}body.alarmon #nav{top:var(--alh,78px)}
+@keyframes alarmp{50%{background:#b91c1c}}@media (prefers-reduced-motion:reduce){#alarm{animation:none}}
+.ucost{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12.5px;color:var(--muted)}.ucost input{width:90px;padding:5px 8px;font-size:13px}
+.bkrow{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}.bkrow:last-child{border:0}
+</style></head><body><div id="alarm" role="alert" hidden></div>
+<div class="app">
 <main>
 <div class="quote" id="quote" hidden></div>
 <div class="taxpot dyn" id="taxpot" hidden></div>
@@ -2789,6 +2977,12 @@ body.ovedit #ovg [data-mod] *{pointer-events:none}
    <div class="tgl"><div>Keys running low<small>10 or fewer keys left, and when they run out.</small></div><input type="checkbox" data-n="keys"></div>
    <div class="row" style="margin-top:12px"><button class="btn" id="setnote" type="button">Notifications: off</button> <button class="btn" id="pushtest" type="button">Send test notification</button></div>
    <div class="muted" style="font-size:12.5px">The switch above turns notifications on for this device. The boxes decide which ones you get.</div>
+  </div>
+  <div class="panel" style="margin-bottom:14px" id="backupbox"><h2>Backup <span>admins</span></h2>
+   <div class="muted" style="font-size:12.5px">A copy of all your data (orders, history, users, notes, keys) is taken automatically every day. The last 14 are kept in the folder "backups" next to dashboard.py. Your .env and secret keys are not included.</div>
+   <div class="row" style="margin-top:12px"><button class="btn" id="bknow" type="button">Back up now</button></div>
+   <div class="rows dyn" id="bklist"></div>
+   <div class="muted" id="bkmsg" style="font-size:12.5px;margin-top:8px"></div>
   </div>
   <div class="panel" style="margin-bottom:14px" id="profbox"><h2>Profile <span>admins</span></h2>
    <div class="field"><label>Emoji</label><input id="pemoji" maxlength="4" placeholder="🙂" autocomplete="off" style="width:90px;text-align:center"></div>
@@ -3227,6 +3421,28 @@ const DA={
 "Could not register this device": "Kunne ikke registrere denne enhed",
 "pywebpush is not installed on the VPS. Run opdater.bat and restart.": "pywebpush er ikke installeret på VPS'en. Kør opdater.bat og start igen.",
 "No device is registered for you. Turn notifications on from the installed app.": "Ingen enhed er registreret til dig. Slå beskeder til fra den installerede app.",
+"Stock value": "Lagerværdi",
+"worth": "værd",
+"profit each": "profit pr. stk.",
+"Cost per unit": "Indkøbspris pr. enhed",
+"profit": "profit",
+"PROGRAM IS DOWN": "PROGRAM ER NEDE",
+"PROGRAMS ARE DOWN": "PROGRAMMER ER NEDE",
+"The dashboard tries to start them again by itself. Tap to see why.": "Dashboardet prøver selv at starte dem igen. Tryk for at se hvorfor.",
+"Backup": "Backup",
+"Back up now": "Tag backup nu",
+"Backup taken.": "Backup taget.",
+"manual": "manuel",
+"before a restore": "før en gendannelse",
+"Download": "Hent",
+"Restore": "Gendan",
+"Restored": "Gendannede",
+"Could not restore.": "Kunne ikke gendanne.",
+"No backups yet. The first one is taken within a few minutes.": "Ingen backups endnu. Den første tages inden for få minutter.",
+"Restart the dashboard now so everything is read again.": "Genstart dashboardet nu, så alt bliver læst igen.",
+"(Your data from before is saved as a safety backup.)": "(Dine data fra før er gemt som en sikkerhedskopi.)",
+"A copy of all your data (orders, history, users, notes, keys) is taken automatically every day. The last 14 are kept in the folder \"backups\" next to dashboard.py. Your .env and secret keys are not included.": "En kopi af alle dine data (ordrer, historik, brugere, noter, keys) tages automatisk hver dag. De seneste 14 gemmes i mappen \"backups\" ved siden af dashboard.py. Din .env og hemmelige nøgler er ikke med.",
+"Saved": "Gemt",
 "payout due": "udbetaling forfalden",
 "payout around": "udbetaling ca.",
 "Expected payout": "Forventet udbetaling",
@@ -3266,7 +3482,7 @@ const VERSION="2026-10-27b";
 let LANG=lsGet("lang","")||((navigator.language||"").toLowerCase().startsWith("da")?"da":"en");
 const t=s=>(LANG==="da"&&Object.prototype.hasOwnProperty.call(DA,s))?DA[s]:s;
 const LOC=()=>LANG==="da"?"da-DK":"en-GB";
-const DAPL={order:["ordre","ordrer"],key:["key","keys"],offer:["tilbud","tilbud"],unit:["enhed","enheder"],review:["anmeldelse","anmeldelser"],device:["enhed","enheder"],day:["dag","dage"],event:["hændelse","hændelser"],program:["program","programmer"],time:["gang","gange"]};
+const DAPL={order:["ordre","ordrer"],key:["key","keys"],offer:["tilbud","tilbud"],unit:["enhed","enheder"],file:["fil","filer"],review:["anmeldelse","anmeldelser"],device:["enhed","enheder"],day:["dag","dage"],event:["hændelse","hændelser"],program:["program","programmer"],time:["gang","gange"]};
 const plural=(n,w)=>LANG==="da"?n+" "+(DAPL[w]||[w,w+"s"])[n===1?0:1]:n+" "+w+(n===1?"":"s");
 const fmt=(n,d=2)=>Number(n).toLocaleString(LOC(),{minimumFractionDigits:d,maximumFractionDigits:d});
 const tm=iso=>new Date(iso).toLocaleTimeString(LOC(),{hour:"2-digit",minute:"2-digit"});
@@ -3389,6 +3605,19 @@ function growthInfo(s){
 }
 const grCls=p=>p>=0?"up":"down",grTxt=p=>(p>=0?"▲ +":"▼ −")+fmt(Math.abs(p),0)+"%";
 function growthBadge(s){const g=growthInfo(s);return g?`<span class="gr ${grCls(g.pct)}" title="${esc(t("compared with the same days last month"))}">${grTxt(g.pct)}</span>`:"";}
+function stockValue(d){
+ const cv=(a,c)=>RATES[c]&&RATES[MAIN]?a/RATES[c]*RATES[MAIN]:a,fee=(d.sales&&d.sales.fee_percent)||0,uc=d.unitcosts||{};
+ let gross=0,profit=0,costed=0,units=0;
+ d.stock.offers.forEach(o=>{const q=o.quantity||0,p=o.price.amount||0;units+=q;gross+=cv(q*p,o.price.currency);
+  if(uc[o.title]!==undefined&&q){costed++;profit+=cv(q*(p*(1-fee/100)-uc[o.title]),o.price.currency);}});
+ return {gross,profit,costed,units};
+}
+function alarmUi(al){
+ const a=$("alarm");document.body.classList.toggle("alarmon",al.length>0);
+ if(!al.length){a.hidden=true;return;}
+ a.hidden=false;a.innerHTML="⚠ "+t(al.length>1?"PROGRAMS ARE DOWN":"PROGRAM IS DOWN")+": "+esc(al.map(x=>x.name).join(", "))+`<small>${t("The dashboard tries to start them again by itself. Tap to see why.")}</small>`;
+ document.documentElement.style.setProperty("--alh",(a.offsetHeight+4)+"px");
+}
 function tiles(d){
  const s=d.sales,cur=esc(shownCur()),r=s.records;
  const tile0=(mod,l,key,v,sub,extra)=>`<div class="tile" data-mod="${mod}" data-help="${key}"><div class="l">${l} ${extra||""}</div><div class="v">${cuHtml(key,mv(v))} <small>${cur}</small></div><div class="s">${sub}</div></div>`;
@@ -3400,6 +3629,7 @@ function tiles(d){
   +tile("all",t("All time"),"t-all",amtOf(s.all),plural(s.all.orders,"order")+other(s.all))
   +tile("avg",t("Average order"),"t-avg",avg(s.all),t("Today")+": "+(s.today.orders?fmt(mv(avg(s.today))):"-")+" "+cur)
   +(hid("stock")?"":`<div class="tile" data-mod="stock" data-help="t-stock"><div class="l">${t("In stock")}</div><div class="v">${cuHtml("t-stock",d.stock.units,0)} <small>${t("units")}</small></div><div class="s">${plural(d.stock.offers.length,"offer")}</div></div>`);
+ if(!hid("stockval")){const sv=stockValue(d);if(sv.units){h+=tile0("stockval",t("Stock value"),"t-stockval",sv.gross,plural(d.stock.offers.length,"offer")+" · "+plural(sv.units,"unit")+(sv.costed?" · "+t("profit")+" "+fmt(mv(sv.profit))+" "+cur:""));}}
  if(d.profit)h+=tile("profit",t("Profit this month"),"t-profit",d.profit.month,t("All time")+": "+fmt(mv(d.profit.all))+" "+cur);
  if(!hid("lastorder")){const lo=d.orders[0],mins=lo?(Date.now()-new Date(lo.time))/6e4:0,cls=!lo?"":mins>360?"bad":mins>120?"warn":"";
   h+=`<div class="tile" data-mod="lastorder" data-help="lastorder"><div class="l">${t("Latest order")}</div><div class="v ${cls}">${lo?esc(waited(lo.time)):"-"}${lo?` <small>${t("ago")}</small>`:""}</div><div class="s">${lo?esc(lo.buyer)+" · "+esc(tm(lo.time)):t("No orders yet.")}</div></div>`;}
@@ -3560,9 +3790,12 @@ function months(d){
 
 // ================= stock / reviews / keys =================
 function stock(d){
- $("stocksum").textContent=fmt(d.stock.units,0)+" "+t("units");
- $("stock").innerHTML=d.stock.offers.length?d.stock.offers.map(o=>{const w=Math.min(100,o.quantity);
-  return `<div class="row2"><div class="t">${esc(o.title)}<small>${esc(o.category)}</small><div class="qbar ${o.quantity<=5?"warn":""}"><i style="width:${w}%"></i></div></div>
+ const sv=stockValue(d);$("stocksum").textContent=fmt(d.stock.units,0)+" "+t("units")+" · "+t("worth")+" "+fmt(mv(sv.gross),0)+" "+shownCur();
+ const fee=(d.sales&&d.sales.fee_percent)||0,uc=d.unitcosts||{};
+ $("stock").innerHTML=d.stock.offers.length?d.stock.offers.map(o=>{const w=Math.min(100,o.quantity),c=uc[o.title];
+  const each=c===undefined?"":` · ${t("profit each")}: ${money(o.price.amount*(1-fee/100)-c,o.price.currency)}`;
+  const cost=isAdmin?`<div class="ucost"><label>${t("Cost per unit")} (${esc(o.price.currency)})</label><input type="number" step="0.01" min="0" inputmode="decimal" data-ucost="${esc(o.title)}" value="${c===undefined?"":c}" placeholder="–">${each}</div>`:"";
+  return `<div class="row2"><div class="t">${esc(o.title)}<small>${esc(o.category)}</small><div class="qbar ${o.quantity<=5?"warn":""}"><i style="width:${w}%"></i></div>${cost}</div>
   <div class="e"><div class="mono">${money(o.price.amount,o.price.currency)}</div><span class="pill ${o.quantity<=5?"warn":""}">${fmt(o.quantity,0)} ${t("in stock")}</span></div></div>`;}).join(""):`<div class="empty">${t("Nothing in stock right now.")}</div>`;
 }
 let RV="all";
@@ -3622,7 +3855,7 @@ function render(d){
  if(!prefsApplied){prefsApplied=true;applyServerPrefs(d.prefs);translateStatic();setTitle();settingsUi();}
  const q=$("quote");q.hidden=!d.quote;q.textContent=d.quote||"";
  $("who").textContent=d.user.name;$("role").textContent=t(d.user.role==="admin"?"admin":"viewer");$("av").textContent=d.user.name.slice(0,1);
- curUi();detectEvents(d);newsNav();once("menu",[PREFS.menu,PREFS.pins,isAdmin],applyMenu);once("ovs",[PREFS.ovorder],ovStyle);once("tax",[d.profit,PREFS.tax,PREFS.hide,K0()],()=>taxpot(d));
+ curUi();detectEvents(d);once("alarm",[d.alarms,LANG],()=>alarmUi(d.alarms||[]));newsNav();once("menu",[PREFS.menu,PREFS.pins,isAdmin],applyMenu);once("ovs",[PREFS.ovorder],ovStyle);once("tax",[d.profit,PREFS.tax,PREFS.hide,K0()],()=>taxpot(d));
  const p=page(),K=[GROSS,shownCur(),HIDE,LANG];
  if(p==="overview"){applyHides();once("status",[d.status,K],()=>statusPanel(d));once("welcome",[d.sales,d.reviews,d.pending.n,d.keys.left,K],()=>welcome(d));
   once("tiles",[d.sales,d.stock.units,d.stock.offers.length,d.profit,d.orders[0],d.reviews,PREFS.hide,K],()=>tiles(d));$("cur1").textContent=shownCur()+" · "+feeNote();$("mt1").textContent=monthTitle();
@@ -3900,9 +4133,10 @@ function settingsUi(){
   +`<input type="color" id="accpick" value="${/^#[0-9a-f]{6}$/i.test(acc)?acc:"#34d399"}" title="${esc(t("Pick any colour"))}" aria-label="${esc(t("Pick any colour"))}">`;
  $("accpick").oninput=e=>{PREFS.accent=e.target.value;syncLocal();applyAccent();};
  $("accpick").onchange=e=>setAccent(e.target.value);
+ if(isAdmin&&Date.now()-bkAt>20000)loadBackups();$("backupbox").style.display=isAdmin?"":"none";
  curUi();tglUi();menuUi();if(document.activeElement!==$("payout"))$("payout").value=PREFS.payout==null?5:PREFS.payout;
  $("bgSeg").innerHTML=BGS.map(b=>`<button type="button" class="chip${(PREFS.bg||"")===b[0]?" on":""}" data-bg="${b[0]}">${esc(t(b[1]))}</button>`).join("");
- const defs=[["today","Today"],["month","This month"],["all","All time"],["avg","Average order"],["stock","In stock"],["profit","Profit this month",1],["taxpot","Tax pot",1],["lastorder","Latest order"],["revrate","Reviews per order"],["chart","Sales per month"],["latest","Latest orders"],["pending","Waiting to be completed"],["reviews","Reviews"],["keys","Keys left"],["stockp","Stock panel"],["status","Eldorado connection"],["others","Other currencies"]];
+ const defs=[["today","Today"],["month","This month"],["all","All time"],["avg","Average order"],["stock","In stock"],["stockval","Stock value"],["profit","Profit this month",1],["taxpot","Tax pot",1],["lastorder","Latest order"],["revrate","Reviews per order"],["chart","Sales per month"],["latest","Latest orders"],["pending","Waiting to be completed"],["reviews","Reviews"],["keys","Keys left"],["stockp","Stock panel"],["status","Eldorado connection"],["others","Other currencies"]];
  $("tilesel").innerHTML=defs.filter(x=>!x[2]||isAdmin).map(x=>`<label class="tgl"><div>${esc(t(x[1]))}</div><input type="checkbox" data-tile="${x[0]}"${hid(x[0])?"":" checked"}></label>`).join("");
  $("profbox").style.display=isAdmin?"":"none";$("taxbox").style.display=isAdmin?"":"none";
  if(document.activeElement!==$("pemoji"))$("pemoji").value=PREFS.emoji||"";
@@ -4164,8 +4398,8 @@ async function refreshAll(){const p=$("ptr");p.classList.add("spin");p.style.top
 })();
 
 // ================= overview editing =================
-const OV_DEFAULT=["today","month","all","avg","stock","profit","lastorder","revrate","others","chart","latest","pending","reviews","keys","stockp","status"];
-const OV_NAMES={today:"Today",month:"This month",all:"All time",avg:"Average order",stock:"In stock",profit:"Profit this month",lastorder:"Latest order",revrate:"Reviews per order",others:"Other currencies",chart:"Sales per month",latest:"Latest orders",pending:"Waiting to be completed",reviews:"Reviews",keys:"Keys left",stockp:"Stock panel",status:"Eldorado connection"};
+const OV_DEFAULT=["today","month","all","avg","stock","stockval","profit","lastorder","revrate","others","chart","latest","pending","reviews","keys","stockp","status"];
+const OV_NAMES={today:"Today",month:"This month",all:"All time",avg:"Average order",stock:"In stock",stockval:"Stock value",profit:"Profit this month",lastorder:"Latest order",revrate:"Reviews per order",others:"Other currencies",chart:"Sales per month",latest:"Latest orders",pending:"Waiting to be completed",reviews:"Reviews",keys:"Keys left",stockp:"Stock panel",status:"Eldorado connection"};
 let OVEDIT=false,OVSEL="";
 function ovOrder(){const o=(PREFS.ovorder||[]).filter(x=>OV_DEFAULT.includes(x));return [...o,...OV_DEFAULT.filter(x=>!o.includes(x))];}
 function ovStyle(){let st=$("ovstyle");if(!st){st=document.createElement("style");st.id="ovstyle";document.head.appendChild(st);}
@@ -4196,6 +4430,30 @@ $("ovg").addEventListener("dragover",e=>{if(!OVEDIT)return;const m=e.target.clos
 $("ovg").addEventListener("drop",e=>{if(!OVEDIT)return;const m=e.target.closest("[data-mod]");e.preventDefault();if(m&&OVSEL)ovMove(OVSEL,m.dataset.mod);});
 $("ovg").addEventListener("dragend",()=>{document.querySelectorAll("#ovg .drag,#ovg .over").forEach(x=>x.classList.remove("drag","over"));});
 new MutationObserver(()=>{if(OVEDIT)document.querySelectorAll("#ovg [data-mod]").forEach(e=>{if(e.draggable!==true)e.draggable=true;if(e.classList.contains("sel")!==(e.dataset.mod===OVSEL))e.classList.toggle("sel",e.dataset.mod===OVSEL);});}).observe($("ovg"),{childList:true,subtree:true});
+
+// ================= stock cost, backups, alarm click =================
+$("alarm").onclick=()=>{location.hash="#programs";};
+$("stock").addEventListener("change",async e=>{const i=e.target.closest("[data-ucost]");if(!i)return;
+ const v=i.value.trim()===""?null:parseFloat(i.value.replace(",","."));if(v!==null&&!(v>=0)){i.value="";return;}
+ try{const r=await post("/api/unitcost",{title:i.dataset.ucost,cost:v},"PUT");if(r.ok){const L=window.__last;if(L){L.unitcosts=L.unitcosts||{};if(v===null)delete L.unitcosts[i.dataset.ucost];else L.unitcosts[i.dataset.ucost]=v;}toast(t("Saved"),"");rerender();}}catch(x){}});
+let bkAt=0;
+function bkSize(n){return n>1048576?(n/1048576).toFixed(1)+" MB":Math.max(1,Math.round(n/1024))+" KB";}
+async function loadBackups(act){
+ if(!isAdmin)return;bkAt=Date.now();
+ try{const r=act==="now"?await post("/api/backups",{}):await fetch("/api/backups");if(!r.ok)return;const j=await r.json();
+  $("bklist").innerHTML=j.backups.length?j.backups.slice(0,8).map(b=>`<div class="bkrow"><div>${esc(full(b.time))}<small class="muted" style="display:block">${bkSize(b.size)}${/-manual/.test(b.name)?" · "+t("manual"):/-safety/.test(b.name)?" · "+t("before a restore"):""}</small></div>
+   <div class="mini2"><a class="btn" href="/api/backups/${encodeURIComponent(b.name)}" download>${t("Download")}</a><button class="btn" data-bkrestore="${esc(b.name)}" type="button">${t("Restore")}</button></div></div>`).join(""):`<div class="empty">${t("No backups yet. The first one is taken within a few minutes.")}</div>`;
+ }catch(e){}
+}
+$("bknow").onclick=async()=>{$("bknow").disabled=true;await loadBackups("now");$("bknow").disabled=false;toast(t("Backup"),t("Backup taken."));};
+let bkArm=null;
+$("bklist").addEventListener("click",async e=>{const b=e.target.closest("[data-bkrestore]");if(!b)return;
+ if(bkArm!==b.dataset.bkrestore){bkArm=b.dataset.bkrestore;b.textContent=t("Sure?");setTimeout(()=>{if(bkArm===b.dataset.bkrestore){bkArm=null;b.textContent=t("Restore");}},4000);return;}
+ bkArm=null;b.disabled=true;
+ try{const r=await post("/api/backups/restore",{name:b.dataset.bkrestore});const j=await r.json();
+  $("bkmsg").textContent=r.ok?t("Restored")+" "+plural(j.restored,"file")+". "+t("Restart the dashboard now so everything is read again.")+" "+t("(Your data from before is saved as a safety backup.)"):(j.error||t("Could not restore."));
+ }catch(x){$("bkmsg").textContent=t("Could not restore.");}
+ b.disabled=false;b.textContent=t("Restore");loadBackups();});
 
 // ---------- War-Room ----------
 let wrStyles={},wrPeople=[];let wrLast=0,wrRev=-1,wrMsgs=[],wrSeen=null,wrMe="",wrStarted=false,wrEdit=null,wrSure=null,wrUnreadTitle=0;
@@ -4480,6 +4738,7 @@ const HELP={
  "t-month":["Sales so far this month. The arrow compares with the same days of last month.","Salg hidtil denne måned. Pilen sammenligner med de samme dage sidste måned."],
  "t-all":["Everything counted since the dashboard started following your orders.","Alt der er talt med, siden dashboardet begyndte at følge dine ordrer."],
  "t-avg":["The average sale: the total divided by the number of orders.","Gennemsnitligt salg: samlet beløb delt med antal ordrer."],
+ "t-stockval":["What everything you have for sale is worth at your listed prices (items and accounts). Add what each unit cost you on the Stock page to see the expected profit after Eldorado fees.","Hvad alt, du har til salg, er værd til dine priser (items og konti). Skriv hvad hver enhed kostede dig på Lager-siden, så ser du forventet profit efter Eldorados gebyr."],
  "t-stock":["Units in stock across all your offers on Eldorado.","Antal enheder på lager på tværs af alle dine tilbud på Eldorado."],
  "t-profit":["Sales after fees minus your costs (VPS, keys and so on) this month. Add costs on the Profit page.","Salg efter gebyrer minus dine omkostninger (VPS, keys osv.) denne måned. Tilføj omkostninger på Profit-siden."],
  "taxpot":["A joke counter: the percent you set in Settings, of your profit, in kroner. It shows how much tax we would have paid.","En joke-tæller: den procent, du har sat i Indstillinger, af din profit, i kroner. Viser hvor meget skat vi ville have betalt."],
@@ -4588,6 +4847,7 @@ def main():
         if not load_users():
             raise SystemExit("No users yet. Create the first one:  py dashboard.py adduser YOURNAME --admin")
         threading.Thread(target=poll_loop, daemon=True).start()
+        threading.Thread(target=_backup_loop, daemon=True).start()
         if not a.no_programs and os.getenv("MANAGE_PROGRAMS", "1") != "0":
             only = {x.strip() for x in os.getenv("PROGRAMS", "").split(",") if x.strip()}
             start_programs(only or None)
