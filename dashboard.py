@@ -285,13 +285,21 @@ def drop_devices(user, keep=None):
 # ---------- who is online / last seen ----------
 
 _presence = {}
+_pres_c = {}                      # device id -> last seen, so a message is still pushed to your phone while the computer is open
 _seen_saved = {}
 _typing = {}
+
+
+def _cid():
+    c = request.headers.get("X-Client", "")[:40]
+    return c if re.fullmatch(r"[A-Za-z0-9_-]{6,40}", c) else ""
 
 
 def touch(name):
     now = time.time()
     _presence[name] = now
+    if _cid():
+        _pres_c[_cid()] = now
     if now - _seen_saved.get(name, 0) > 30:
         _seen_saved[name] = now
         with _file_lock:
@@ -1478,7 +1486,7 @@ def notify_event(kind, texts, url):
                      kwargs={"kind": kind, "url": url, "skip_present": True}, daemon=True).start()
 
 
-def send_push(title, body, skip_user=None, skip_present=True, webpush_fn=None, kind="warroom", url="/#warroom", only_user=None):
+def send_push(title, body, skip_user=None, skip_present=True, webpush_fn=None, kind="warroom", url="/#warroom", only_user=None, skip_dev=None):
     """Sends a notification to every subscribed admin device that wants this kind. Dead subscriptions are removed.
     title/body can be a text or {"da": ..., "en": ...} (each person gets the language they chose)."""
     if DEMO:
@@ -1499,8 +1507,10 @@ def send_push(title, body, skip_user=None, skip_present=True, webpush_fn=None, k
         skip = skip_user if isinstance(skip_user, (set, frozenset, list, tuple)) else {skip_user}
         if s["user"] in skip or s["user"] not in admins or (only_user and s["user"] != only_user):
             continue
-        if skip_present and now - _presence.get(s["user"], 0) < 20:
-            continue  # that person has the page open, the page tells them itself
+        if skip_dev and s["user"] == skip_dev[0] and (not s.get("cid") or s.get("cid") == skip_dev[1]):
+            continue  # the device the message was sent from
+        if skip_present and now - (_pres_c.get(s["cid"], 0) if s.get("cid") else _presence.get(s["user"], 0)) < 20:
+            continue  # that device has the page open, the page tells them itself
         pr = prefs_of(s["user"])
         if not pr["notify"].get(kind, True):
             continue
@@ -1550,7 +1560,7 @@ def api_push_subscribe():
         subs = [s for s in load_subs() if s["sub"]["endpoint"] != clean["endpoint"]]
         mine = [s for s in subs if s["user"] == me][-9:]
         subs = [s for s in subs if s["user"] != me] + mine
-        subs.append({"user": me, "sub": clean, "created": datetime.now(timezone.utc).isoformat()})
+        subs.append({"user": me, "sub": clean, "cid": _cid(), "created": datetime.now(timezone.utc).isoformat()})
         save_subs(subs)
     return jsonify(ok=True)
 
@@ -1655,6 +1665,8 @@ def api_warroom():
     with _wr_lock:
         _wr_load()
         _presence[me] = now
+        if _cid():
+            _pres_c[_cid()] = now
         if request.method == "POST":
             text = str((request.get_json(silent=True) or {}).get("text", "")).replace("\r\n", "\n").strip()
             if not text:
@@ -1673,7 +1685,7 @@ def api_warroom():
             tagged = {n for n in names if n != me and re.search(r"(?<![\w@])@" + re.escape(n) + r"(?![\w-])", text, re.I)}
             msg["mentions"] = sorted(tagged)
             _wr_save()
-            threading.Thread(target=send_push, args=("War-Room · " + me, text), kwargs={"skip_user": {me} | tagged}, daemon=True).start()
+            threading.Thread(target=send_push, args=("War-Room · " + me, text), kwargs={"skip_user": tagged, "skip_dev": (me, _cid())}, daemon=True).start()
             for n in tagged:
                 threading.Thread(target=send_push, args=({"da": f"{me} nævnte dig", "en": f"{me} mentioned you"}, text),
                                  kwargs={"only_user": n}, daemon=True).start()
@@ -3261,6 +3273,8 @@ const BGS=[["","None"],["dots","Dots"],["grid","Grid"],["waves","Waves"],["auror
 function applyBg(){document.body.dataset.bg=PREFS.bg||"";lsSet("bg",PREFS.bg||"");}
 let GROSS=lsGet("gross","0")==="1",HIDE=lsGet("hide","0")==="1",CURSEL=lsGet("cur","");
 let MAIN="USD",RATES={},RATES_LIVE=false,RATES_DATE=null,isAdmin=false,prefsApplied=false,saveTimer=null;
+const CID=(()=>{try{let c=localStorage.getItem("cid");if(!c||!/^[A-Za-z0-9_-]{6,40}$/.test(c)){c=Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(36).padStart(2,"0")).join("").slice(0,20);localStorage.setItem("cid",c);}return c;}catch(e){return "";}})();
+if(CID){const _f=window.fetch.bind(window);window.fetch=(u,o)=>{o=o||{};if(typeof u==="string"&&u[0]==="/"){const h=new Headers(o.headers||{});h.set("X-Client",CID);o={...o,headers:h};}return _f(u,o);};}
 const post=(url,body,method)=>fetch(url,{method:method||"POST",headers:{"X-Requested-With":"dashboard","Content-Type":"application/json"},body:body?JSON.stringify(body):undefined});
 function syncLocal(){lsSet("lang",PREFS.lang||LANG);lsSet("accent",PREFS.accent);lsSet("cur",PREFS.currency);lsSet("sound",PREFS.sound);}
 function savePrefs(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>{post("/api/prefs",PREFS,"PUT").catch(()=>{});},300);}
