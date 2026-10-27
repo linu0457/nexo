@@ -2503,7 +2503,7 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
 
 /* round 3 */
 .gr{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;white-space:nowrap}.gr.up{background:var(--accentbg);color:var(--accent)}.gr.down{background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)}
-[data-help]{cursor:pointer}.tile[data-help] .l:after{content:"\24D8";font-size:11px;color:var(--muted);opacity:.7;margin-left:2px}
+.tile[data-help] .l:after,.panel[data-help]>h2:after{content:"\24D8";font-size:11px;color:var(--muted);opacity:.7;margin-left:4px;font-weight:400}
 .helpb{position:fixed;z-index:120;max-width:min(320px,calc(100vw - 24px));background:var(--ink);color:var(--bg);border-radius:12px;padding:10px 13px;font-size:13px;line-height:1.45;box-shadow:0 12px 36px rgba(0,0,0,.4)}.helpb[hidden]{display:none}
 .prog{border-bottom:1px solid var(--line);padding:12px 0}.prog:last-child{border-bottom:0}
 .prog .ph{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.prog .pn{flex:1 1 200px;min-width:0}.prog .pn small{display:block;color:var(--muted);font-size:12.5px}
@@ -4349,6 +4349,9 @@ document.addEventListener("click",e=>{
  if(!h.hidden&&!e.target.closest("[data-help]"))helpHide();
  const el=e.target.closest("[data-help]");if(!el)return;
  if(e.target.closest("button,a,input,select,textarea,label,[data-oid],[data-buyer],[data-copy],.row2,.cd,.hrow"))return;
+ const lab=el.querySelector(el.classList.contains("tile")?".l":":scope>h2");if(!lab)return;
+ const rg=document.createRange();rg.selectNodeContents(lab);const rs=rg.getClientRects(),lr=rs[rs.length-1];if(!lr)return;
+ if(e.clientX<lr.right-2||e.clientX>lr.right+26||e.clientY<lr.top-8||e.clientY>lr.bottom+8)return;
  const tx=HELP[el.dataset.help];if(!tx)return;
  h.textContent=tx[LANG==="da"?1:0];h.hidden=false;
  const r=el.getBoundingClientRect(),w=h.offsetWidth,hh=h.offsetHeight;
