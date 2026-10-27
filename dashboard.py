@@ -2292,7 +2292,7 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
  <div class="panel welcome dyn" id="welcome"><div class="sk line" style="width:60%"></div></div>
  <div class="tiles dyn" id="tiles"><div class="sk tile"></div><div class="sk tile"></div><div class="sk tile"></div><div class="sk tile"></div></div>
  <div class="grid">
-  <div class="panel"><h2>Sales per month <span id="cur1"></span></h2><div class="chart dyn" id="chart1"><div class="sk box"></div></div></div>
+  <div class="panel"><h2><b id="mt1">Sales per month</b> <span id="cur1"></span></h2><div class="chart dyn" id="chart1"><div class="sk box"></div></div></div>
   <div class="panel"><h2>Latest orders <a href="#orders">View all</a></h2><div class="dyn" id="latest"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div></div>
  </div>
  <div class="grid2">
@@ -2305,7 +2305,7 @@ body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px)
 <section class="page" id="p-sales">
  <div class="tiles dyn" id="stiles"><div class="sk tile"></div><div class="sk tile"></div><div class="sk tile"></div></div>
  <div class="grid">
-  <div class="panel"><h2>Sales per month <span id="cur2"></span></h2><div class="chart dyn" id="chart2"><div class="sk box"></div></div></div>
+  <div class="panel"><h2><b id="mt2">Sales per month</b> <span id="cur2"></span></h2><div class="chart dyn" id="chart2"><div class="sk box"></div></div></div>
   <div class="panel"><h2>Records</h2><div class="rows dyn" id="recs"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div></div>
  </div>
  <div class="grid">
@@ -2827,6 +2827,8 @@ const DA={
 "Cancelled": "Annulleret",
 "Show more": "Vis flere",
 "Orders from before the history started are shown as added. Cancelled orders only show from when the history started.": "Ordrer fra før historikken startede vises som tilføjet. Annullerede ordrer vises kun fra det tidspunkt, historikken startede.",
+"Gross per month": "Brutto pr. måned",
+"Net per month": "Netto pr. måned",
 "Big update": "Stor opdatering",
 "More tools": "Flere værktøjer"
 };
@@ -3000,6 +3002,7 @@ function applyHides(){
  [["chart1","chart"],["latest","latest"],["pend","pending"]].forEach(([id,k])=>{const p=$(id).closest(".panel");if(p)p.style.display=hid(k)?"none":"";});
 }
 function niceStep(peak){for(const s of [5,10,20,25,50,100,200,250,500,1000,2000,2500,5000,10000,20000,50000]) if(peak/s<=4)return s;return 100000;}
+const monthTitle=()=>GROSS?t("Gross per month"):t("Net per month");
 function chart(d,boxId,count){
  const box=$(boxId);if(!box||!box.clientWidth)return;
  const c=shownCur();let m=d.sales.months.slice(-count).map(x=>({...x,v:mv(GROSS?x.gross:x.amount),label:monthLabel(x.key),short:monthLabel(x.key,true)}));
@@ -3019,7 +3022,7 @@ function chart(d,boxId,count){
   g+=`<text class="tx" x="${cx}" y="${H-8}" text-anchor="middle">${esc(x.short)}</text>`;
   g+=`<rect class="hit" data-i="${i}" x="${cx-iw/n/2}" y="${T}" width="${iw/n}" height="${ih}" fill="transparent"/>`;
  });
- box.innerHTML=`<svg class="ch" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(t("Sales per month"))}">${g}</svg><div class="tip"></div>`;
+ box.innerHTML=`<svg class="ch" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(monthTitle())}">${g}</svg><div class="tip"></div>`;
  const tip=box.querySelector(".tip");
  const show=(el,e)=>{const x=m[+el.dataset.i],b=box.getBoundingClientRect();
   tip.textContent=`${x.label} · ${fmt(x.v)} ${c} · ${plural(x.orders,"order")}`;
@@ -3183,10 +3186,10 @@ function render(d){
  curUi();detectEvents(d);newsNav();once("tax",[d.profit,PREFS.tax,PREFS.hide,K0()],()=>taxpot(d));
  const p=page(),K=[GROSS,shownCur(),HIDE,LANG];
  if(p==="overview"){applyHides();once("status",[d.status,K],()=>statusPanel(d));once("welcome",[d.sales,d.reviews,d.pending.n,d.keys.left,K],()=>welcome(d));
-  once("tiles",[d.sales,d.stock.units,d.stock.offers.length,d.profit,d.orders[0],d.reviews,PREFS.hide,K],()=>tiles(d));$("cur1").textContent=shownCur()+" · "+feeNote();
+  once("tiles",[d.sales,d.stock.units,d.stock.offers.length,d.profit,d.orders[0],d.reviews,PREFS.hide,K],()=>tiles(d));$("cur1").textContent=shownCur()+" · "+feeNote();$("mt1").textContent=monthTitle();
   once("c1",[d.sales.months,$("chart1").clientWidth,K],()=>chart(d,"chart1",6));once("latest",[d.orders,K],()=>latest(d));
   once("pend",[d.pending,K],()=>pending(d));once("mini",[d.reviews,d.keys,d.stock,PREFS.hide,K],()=>mini(d));}
- if(p==="sales"){$("cur2").textContent=shownCur()+" · "+feeNote();
+ if(p==="sales"){$("cur2").textContent=shownCur()+" · "+feeNote();$("mt2").textContent=monthTitle();
   once("stiles",[d.sales,K],()=>salesTiles(d));once("c2",[d.sales.months,$("chart2").clientWidth,K],()=>chart(d,"chart2",12));
   once("recs",[d.sales.records,K],()=>records(d));once("cal",[d.sales.days,calMonth,selDay,K],()=>calendar(d));
   once("fees",[d.sales,K],()=>fees(d));once("months",[d.sales.months,K],()=>months(d));
