@@ -4428,6 +4428,13 @@ $("ovg").addEventListener("click",e=>{if(!OVEDIT)return;e.preventDefault();e.sto
 $("ovg").addEventListener("dragstart",e=>{const m=e.target.closest&&e.target.closest("[data-mod]");if(!OVEDIT||!m){return;}OVSEL=m.dataset.mod;e.dataTransfer.effectAllowed="move";try{e.dataTransfer.setData("text/plain",OVSEL);}catch(x){}m.classList.add("drag");});
 $("ovg").addEventListener("dragover",e=>{if(!OVEDIT)return;const m=e.target.closest("[data-mod]");if(!m)return;e.preventDefault();document.querySelectorAll("#ovg .over").forEach(x=>{if(x!==m)x.classList.remove("over");});if(m.dataset.mod!==OVSEL)m.classList.add("over");});
 $("ovg").addEventListener("drop",e=>{if(!OVEDIT)return;const m=e.target.closest("[data-mod]");e.preventDefault();if(m&&OVSEL)ovMove(OVSEL,m.dataset.mod);});
+let ovY=-1,ovRaf=0;
+function ovScroll(){if(ovY<0){ovRaf=0;return;}const z=Math.min(110,innerHeight*.18);let v=0;
+ if(ovY<z)v=-Math.ceil((z-ovY)/z*26);else if(ovY>innerHeight-z)v=Math.ceil((ovY-(innerHeight-z))/z*26);
+ if(v)window.scrollBy(0,v);ovRaf=requestAnimationFrame(ovScroll);}
+function ovScrollStop(){ovY=-1;}
+document.addEventListener("dragover",e=>{if(!OVEDIT||e.clientY===undefined)return;ovY=e.clientY;if(!ovRaf)ovRaf=requestAnimationFrame(ovScroll);});
+document.addEventListener("drop",ovScrollStop);document.addEventListener("dragend",ovScrollStop);
 $("ovg").addEventListener("dragend",()=>{document.querySelectorAll("#ovg .drag,#ovg .over").forEach(x=>x.classList.remove("drag","over"));});
 new MutationObserver(()=>{if(OVEDIT)document.querySelectorAll("#ovg [data-mod]").forEach(e=>{if(e.draggable!==true)e.draggable=true;if(e.classList.contains("sel")!==(e.dataset.mod===OVSEL))e.classList.toggle("sel",e.dataset.mod===OVSEL);});}).observe($("ovg"),{childList:true,subtree:true});
 
