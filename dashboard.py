@@ -26,6 +26,9 @@ Optional in .env:
 """
 import argparse
 import fnmatch
+import shutil
+import platform
+import ctypes
 import base64
 import getpass
 import hashlib
@@ -76,8 +79,8 @@ PRESENCE_FILE, DEVICES_FILE = Path("presence.json"), Path("devices.json")
 CURRENCIES = ("DKK", "USD", "EUR")
 SOUNDS = ("ding", "bell", "pop", "chime", "none")
 NOTIFY_KINDS = ("warroom", "orders", "reviews", "keys")
-OVERVIEW_TILES = ("today", "month", "all", "avg", "stock", "profit", "taxpot", "lastorder", "revrate", "pending", "reviews", "keys", "latest", "chart", "stockp", "status", "others", "stockval")
-NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys", "warroom", "mindmap", "profit", "programs", "users", "settings", "news")
+OVERVIEW_TILES = ("today", "month", "all", "avg", "stock", "profit", "taxpot", "lastorder", "revrate", "pending", "reviews", "keys", "latest", "chart", "stockp", "status", "others", "stockval", "forecast")
+NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys", "warroom", "mindmap", "profit", "programs", "server", "users", "settings", "news")
 BACKGROUNDS = ("", "dots", "grid", "waves", "aurora", "diagonal")
 DEFAULT_PREFS = {"lang": "", "accent": "", "currency": "", "sound": "ding", "gross": None, "tax": 37,
                  "emoji": "", "color": "", "bg": "", "hide": [], "menu": [], "pins": [], "payout": 5, "ovorder": [],
@@ -142,7 +145,7 @@ app.config.update(
     SESSION_COOKIE_SECURE=os.getenv("DASHBOARD_HTTPS") == "1",
     PERMANENT_SESSION_LIFETIME=timedelta(days=LOGIN_DAYS),
     SESSION_REFRESH_EACH_REQUEST=True,  # every visit pushes the expiry forward again
-    MAX_CONTENT_LENGTH=512 * 1024,
+    MAX_CONTENT_LENGTH=6 * 1024 * 1024,   # room for a 5 MB War-Room picture; everything else is tiny
 )
 
 
@@ -1683,26 +1686,9 @@ def api_warroom():
             _pres_c[_cid()] = now
         if request.method == "POST":
             text = str((request.get_json(silent=True) or {}).get("text", "")).replace("\r\n", "\n").strip()
-            if not text:
-                return jsonify(error="Empty message."), 400
-            if len(text) > WARROOM_MAX_LEN:
-                return jsonify(error=f"Max {WARROOM_MAX_LEN} characters."), 400
-            if now - _last_post.get(me, 0) < 0.4:
-                return jsonify(error="Slow down a little."), 429
-            _last_post[me] = now
-            msg = {"id": _wr["next"], "user": me, "text": text, "time": datetime.now(timezone.utc).isoformat()}
-            _wr["next"] += 1
-            _wr["msgs"].append(msg)
-            del _wr["msgs"][:-WARROOM_KEEP]
-            _wr_save()
-            names = [x["name"] for x in load_users().values() if x["role"] == "admin"]
-            tagged = {n for n in names if n != me and re.search(r"(?<![\w@])@" + re.escape(n) + r"(?![\w-])", text, re.I)}
-            msg["mentions"] = sorted(tagged)
-            _wr_save()
-            threading.Thread(target=send_push, args=("War-Room · " + me, text), kwargs={"skip_user": tagged, "skip_dev": (me, _cid())}, daemon=True).start()
-            for n in tagged:
-                threading.Thread(target=send_push, args=({"da": f"{me} nævnte dig", "en": f"{me} mentioned you"}, text),
-                                 kwargs={"only_user": n}, daemon=True).start()
+            msg, err = _wr_add(me, text, None, now)
+            if err:
+                return jsonify(error=err[0]), err[1]
             return jsonify(ok=True, id=msg["id"])
         try:
             after = int(request.args.get("after", "0"))
@@ -1723,6 +1709,130 @@ def api_warroom():
                   for n in admins}
         return jsonify(messages=msgs, online=online, away=away, typing=typing, me=me, rev=_wr["rev"],
                        reset=reset or after <= 0, styles=styles, people=sorted(admins, key=str.lower))
+
+
+WR_FILES = Path(__file__).resolve().parent / "warroom_files"
+WR_FILE_MAX = 5 * 1024 * 1024
+WR_FILE_RE = re.compile(r"^[0-9a-f]{32}\.(png|jpg|gif|webp|pdf)$")
+WR_MIME = {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp", "pdf": "application/pdf"}
+
+
+def _wr_kind(data):
+    """Only images and PDFs, decided by what the file really is and not by its name."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if data[:4] == b"GIF8":
+        return "gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    if data[:5] == b"%PDF-":
+        return "pdf"
+    return None
+
+
+def _wr_add(me, text, file, now):
+    """Adds a War-Room message (caller holds _wr_lock). Returns (msg, None) or (None, (error, status))."""
+    if not text and not file:
+        return None, ("Empty message.", 400)
+    if len(text) > WARROOM_MAX_LEN:
+        return None, (f"Max {WARROOM_MAX_LEN} characters.", 400)
+    if now - _last_post.get(me, 0) < 0.4:
+        return None, ("Slow down a little.", 429)
+    _last_post[me] = now
+    msg = {"id": _wr["next"], "user": me, "text": text, "time": datetime.now(timezone.utc).isoformat()}
+    if file:
+        msg["file"] = file
+    _wr["next"] += 1
+    _wr["msgs"].append(msg)
+    del _wr["msgs"][:-WARROOM_KEEP]
+    _wr_gc()
+    names = [x["name"] for x in load_users().values() if x["role"] == "admin"]
+    tagged = {n for n in names if n != me and re.search(r"(?<![\w@])@" + re.escape(n) + r"(?![\w-])", text, re.I)}
+    msg["mentions"] = sorted(tagged)
+    _wr_save()
+    shown = text or ("📎 " + (file or {}).get("name", ""))
+    threading.Thread(target=send_push, args=("War-Room · " + me, shown), kwargs={"skip_user": tagged, "skip_dev": (me, _cid())}, daemon=True).start()
+    for n in tagged:
+        threading.Thread(target=send_push, args=({"da": f"{me} nævnte dig", "en": f"{me} mentioned you"}, shown),
+                         kwargs={"only_user": n}, daemon=True).start()
+    return msg, None
+
+
+def _wr_gc():
+    """Deletes uploaded files no message points at any more (deleted or pushed out of the last 500)."""
+    if DEMO or not WR_FILES.is_dir():
+        return
+    keep = {m["file"]["id"] for m in _wr["msgs"] if isinstance(m.get("file"), dict)}
+    for p in WR_FILES.iterdir():
+        if p.is_file() and WR_FILE_RE.match(p.name) and p.name not in keep:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+@app.route("/api/warroom/upload", methods=["POST"])
+def api_warroom_upload():
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    f = request.files.get("file")
+    if not f:
+        return jsonify(error="No file."), 400
+    data = f.read(WR_FILE_MAX + 1)
+    if len(data) > WR_FILE_MAX:
+        return jsonify(error="The file is too big (max 5 MB)."), 413
+    ext = _wr_kind(data)
+    if not ext:
+        return jsonify(error="Only pictures (png, jpg, gif, webp) and PDF files."), 400
+    me = current_user()["name"]
+    text = str(request.form.get("text", "")).replace("\r\n", "\n").strip()
+    clean = re.sub(r"[^\w .()-]", "_", os.path.basename(f.filename or "file"))[:60] or "file"
+    fid = uuid.uuid4().hex + "." + ext
+    with _wr_lock:
+        _wr_load()
+        if not DEMO:
+            WR_FILES.mkdir(exist_ok=True)
+            tmp = WR_FILES / (fid + ".tmp")
+            tmp.write_bytes(data)
+            tmp.replace(WR_FILES / fid)
+        else:
+            _demo_files[fid] = data
+        msg, err = _wr_add(me, text, {"id": fid, "name": clean, "kind": "pdf" if ext == "pdf" else "image", "size": len(data)}, time.time())
+        if err:
+            if not DEMO:
+                try:
+                    (WR_FILES / fid).unlink()
+                except OSError:
+                    pass
+            return jsonify(error=err[0]), err[1]
+    return jsonify(ok=True, id=msg["id"])
+
+
+_demo_files = {}
+
+
+@app.route("/api/warroom/file/<fid>")
+def api_warroom_file(fid):
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    if not WR_FILE_RE.match(fid):
+        return jsonify(error="No such file."), 404
+    if DEMO:
+        data = _demo_files.get(fid)
+    else:
+        p = WR_FILES / fid
+        data = p.read_bytes() if p.is_file() else None
+    if data is None:
+        return jsonify(error="No such file."), 404
+    ext = fid.rsplit(".", 1)[1]
+    h = {"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff",
+         "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox"}
+    h["Content-Disposition"] = ("attachment" if ext == "pdf" else "inline") + f'; filename="{fid}"'
+    return Response(data, mimetype=WR_MIME[ext], headers=h)
 
 
 @app.route("/api/warroom/typing", methods=["POST"])
@@ -1749,9 +1859,10 @@ def api_warroom_one(mid):
             return jsonify(error="You can only change your own messages."), 403
         if request.method == "DELETE":
             _wr["msgs"].remove(msg)
+            _wr_gc()
         else:
             text = str((request.get_json(silent=True) or {}).get("text", "")).replace("\r\n", "\n").strip()
-            if not text:
+            if not text and not msg.get("file"):
                 return jsonify(error="Empty message."), 400
             if len(text) > WARROOM_MAX_LEN:
                 return jsonify(error=f"Max {WARROOM_MAX_LEN} characters."), 400
@@ -2153,6 +2264,140 @@ def api_changelog():
     return jsonify(rows=_chlog["rows"], head=_chlog["head"])
 
 
+# ---------- own password, server page, restart ----------
+
+START_TIME = time.time()
+
+
+@app.route("/api/password", methods=["POST"])
+def api_password():
+    """Anyone can change their own password (the old one has to be right)."""
+    bad = api_guard()
+    if bad:
+        return bad
+    me = session.get("u")
+    j = request.get_json(silent=True) or {}
+    old, new = str(j.get("old", "")), str(j.get("new", ""))
+    if is_blocked(me):
+        return jsonify(error="Too many attempts. Try again in a few minutes."), 429
+    if len(new) < 8:
+        return jsonify(error="The new password must be at least 8 characters."), 400
+    if len(new) > 200:
+        return jsonify(error="That password is too long."), 400
+    with _users_lock:
+        users = load_users()
+        u = users.get(me)
+        if not u or not check_password_hash(u["hash"], old):
+            register_fail(me)
+            return jsonify(error="The old password is not right."), 400
+        if old == new:
+            return jsonify(error="Pick a password that is different from the old one."), 400
+        u["hash"] = generate_password_hash(new)
+        save_users(users)
+        drop_devices(me, keep=session.get("d"))      # other devices have to log in again
+    clear_fails(me)
+    return jsonify(ok=True)
+
+
+def _machine_mem():
+    """(total, available) bytes of the machine, or (None, None)."""
+    try:
+        if os.name == "nt":
+            class MS(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong), ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong), ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong), ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong), ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            s = MS()
+            s.dwLength = ctypes.sizeof(MS)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(s))
+            return int(s.ullTotalPhys), int(s.ullAvailPhys)
+        info = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            k, _, v = line.partition(":")
+            info[k] = int(v.split()[0]) * 1024
+        return info.get("MemTotal"), info.get("MemAvailable")
+    except Exception:
+        return None, None
+
+
+def _folder_size(p):
+    n = 0
+    try:
+        for x in Path(p).iterdir():
+            if x.is_file():
+                n += x.stat().st_size
+    except OSError:
+        pass
+    return n
+
+
+_git_cache = {"at": 0, "v": None}
+
+
+def _git_head():
+    if time.time() - _git_cache["at"] < 120:
+        return _git_cache["v"]
+    v = None
+    try:
+        r = subprocess.run(["git", "log", "-1", "--pretty=format:%h%x09%cI%x09%s"], cwd=str(Path(__file__).resolve().parent),
+                           capture_output=True, text=True, timeout=4)
+        if r.returncode == 0 and r.stdout.strip():
+            h, d, s = (r.stdout.strip().split("\t") + ["", ""])[:3]
+            v = {"hash": h, "date": d, "subject": s[:100]}
+    except Exception:
+        pass
+    _git_cache.update(at=time.time(), v=v)
+    return v
+
+
+@app.route("/api/server")
+def api_server():
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    base = Path(__file__).resolve().parent
+    try:
+        du = shutil.disk_usage(base)
+        disk = {"total": du.total, "used": du.used, "free": du.free}
+    except OSError:
+        disk = None
+    mt, ma = _machine_mem()
+    bk = list_backups()
+    progs = [p for p in _progs.values() if not p.fake]
+    return jsonify(
+        started=datetime.fromtimestamp(START_TIME, timezone.utc).isoformat(), uptime=int(time.time() - START_TIME),
+        disk=disk, mem={"total": mt, "free": ma} if mt else None,
+        data=sum((base / n).stat().st_size for n in _backup_members() if (base / n).is_file()),
+        backups={"n": len(bk), "last": bk[0]["time"] if bk else None, "size": _folder_size(BACKUP_DIR)},
+        files={"n": len(list(WR_FILES.iterdir())) if WR_FILES.is_dir() else 0, "size": _folder_size(WR_FILES)},
+        programs={"managed": _prog_managed, "running": sum(1 for p in progs if p.state == "running"), "total": len(progs)},
+        commit=_git_head(), python=platform.python_version(), system=platform.system() + " " + platform.release(),
+        supervised=os.environ.get("NEXO_SUPERVISED") == "1" or DEMO, demo=DEMO)
+
+
+@app.route("/api/restart", methods=["POST"])
+def api_restart():
+    """Stops the programs and exits with code 3. start_all.py sees that and starts everything again."""
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    if DEMO:
+        return jsonify(ok=True, demo=True)
+    if os.environ.get("NEXO_SUPERVISED") != "1":
+        return jsonify(error="The dashboard was not started with start_all.py, so nothing would start it again. Start it with  py start_all.py  (or the autostart)."), 400
+
+    def go():
+        time.sleep(1)
+        print("Restart requested from the website.", flush=True)
+        try:
+            stop_programs()
+        finally:
+            os._exit(3)
+    threading.Thread(target=go, daemon=True).start()
+    return jsonify(ok=True)
+
+
 # ---------- unit costs, backups and alarms ----------
 
 UCOST_FILE = Path("unitcosts.json")
@@ -2216,10 +2461,14 @@ def _backup_members():
     out = {n for n in BACKUP_NAMES if (base / n).is_file()}
     for g in BACKUP_GLOBS:
         out |= {p.name for p in base.glob(g) if p.is_file()}
+    if WR_FILES.is_dir():
+        out |= {"warroom_files/" + p.name for p in WR_FILES.iterdir() if p.is_file() and WR_FILE_RE.match(p.name)}
     return sorted(out)
 
 
 def _backup_allowed(name):
+    if name.startswith("warroom_files/"):
+        return bool(WR_FILE_RE.match(name[len("warroom_files/"):]))
     return name in BACKUP_NAMES or any(fnmatch.fnmatch(name, g) for g in BACKUP_GLOBS)
 
 
@@ -2304,8 +2553,10 @@ def api_backup_restore():
         restored = []
         with zipfile.ZipFile(BACKUP_DIR / name) as z:
             for n in z.namelist():
-                if "/" in n or "\\" in n or not _backup_allowed(n):
+                if "\\" in n or n.count("/") > 1 or ".." in n or not _backup_allowed(n):
                     continue
+                if n.startswith("warroom_files/"):
+                    (base / "warroom_files").mkdir(exist_ok=True)
                 tmp = base / (n + ".restore")
                 tmp.write_bytes(z.read(n))
                 tmp.replace(base / n)
@@ -2805,6 +3056,12 @@ body.alarmon .app{padding-top:var(--alh,78px)}body.alarmon #nav{top:var(--alh,78
 @keyframes alarmp{50%{background:#b91c1c}}@media (prefers-reduced-motion:reduce){#alarm{animation:none}}
 .ucost{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12.5px;color:var(--muted)}.ucost input{width:90px;padding:5px 8px;font-size:13px}
 .bkrow{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}.bkrow:last-child{border:0}
+
+/* war-room files, server page, password */
+.wimg{display:block;max-width:min(280px,100%);max-height:240px;border-radius:10px;margin-top:6px;object-fit:cover}.bub .wimg:first-child{margin-top:0}
+.wpdf{display:inline-block;margin-top:4px;color:var(--accent);font-weight:600;text-decoration:none}
+.srv{display:grid;gap:0}.srv .r1{display:flex;justify-content:space-between;gap:14px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}.srv .r1:last-child{border:0}
+.srv .r1 small{display:block;color:var(--muted);font-size:12px}.srv .v{text-align:right;font-weight:600}.srv .qbar{margin:6px 0 0;min-width:140px}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
@@ -2874,6 +3131,11 @@ body.alarmon .app{padding-top:var(--alh,78px)}body.alarmon #nav{top:var(--alh,78
  <div class="dyn" id="proglist"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div>
  <div class="muted" style="font-size:12.5px;margin-top:10px">The dashboard starts these programs and starts them again if they stop. Restart one if it seems stuck.</div></div></section>
 
+<section class="page" id="p-server"><div class="panel"><h2>Server <span id="srvsum"></span></h2>
+ <div class="srv dyn" id="srvbox"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div>
+ <div class="row" style="margin-top:16px"><button class="btn" id="srvrestart" type="button">Restart the dashboard</button></div>
+ <div class="muted" id="srvmsg" style="font-size:12.5px;margin-top:8px">Restarting stops the programs and starts everything again. It takes about half a minute. The page reloads itself.</div></div></section>
+
 <section class="page" id="p-orders">
  <div class="panel" style="margin-bottom:14px"><h2>Waiting to be completed <span id="pendsum"></span></h2><div class="dyn" id="opend"></div></div>
  <div class="bar2"><input type="search" id="osearch" placeholder="Search buyer, item or order ID" autocomplete="off">
@@ -2910,6 +3172,7 @@ body.alarmon .app{padding-top:var(--alh,78px)}body.alarmon #nav{top:var(--alh,78
  <div class="typing dyn" id="typing"></div>
  <div class="sugg dyn" id="wsugg" hidden></div>
  <form class="send" id="wform"><textarea id="wt" rows="1" maxlength="1000" placeholder="Write a message..." autocomplete="off"></textarea>
+ <button class="btn icon" id="wattach" type="button" title="Attach a picture or PDF" aria-label="Attach a picture or PDF"><svg class="i" viewBox="0 0 24 24"><path d="M21 12l-8.5 8.5a5 5 0 01-7-7L14 5a3.5 3.5 0 015 5l-8.5 8.5a2 2 0 01-3-3L15 8"/></svg></button><input type="file" id="wfile" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf" hidden>
  <button class="btn primary" id="wsend" type="submit">Send</button></form>
  <div class="muted" id="wmsg" style="font-size:12.5px;min-height:18px;margin-top:4px">Enter sends, Shift+Enter for a new line.</div>
 </div></section>
@@ -2986,6 +3249,12 @@ body.alarmon .app{padding-top:var(--alh,78px)}body.alarmon #nav{top:var(--alh,78
    <div class="rows dyn" id="bklist"></div>
    <div class="muted" id="bkmsg" style="font-size:12.5px;margin-top:8px"></div>
   </div>
+  <div class="panel" style="margin-bottom:14px" id="pwbox"><h2>Password</h2>
+   <div class="field"><label>Old password</label><input type="password" id="pwold" autocomplete="current-password"></div>
+   <div class="field"><label>New password <small class="muted">(at least 8 characters)</small></label><input type="password" id="pwnew" autocomplete="new-password"></div>
+   <div class="field"><label>New password again</label><input type="password" id="pwnew2" autocomplete="new-password"></div>
+   <div class="row" style="margin-top:6px"><button class="btn" id="pwsave" type="button">Change password</button></div>
+   <div class="muted" id="pwmsg" style="font-size:12.5px;margin-top:6px">Your other devices are logged out when you change it.</div></div>
   <div class="panel" style="margin-bottom:14px" id="profbox"><h2>Profile <span>admins</span></h2>
    <div class="field"><label>Emoji</label><input id="pemoji" maxlength="4" placeholder="🙂" autocomplete="off" style="width:90px;text-align:center"></div>
    <div class="field"><label>Name colour</label><div class="sw" id="pcol"></div></div>
@@ -3018,6 +3287,7 @@ body.alarmon .app{padding-top:var(--alh,78px)}body.alarmon #nav{top:var(--alh,78
   <a href="#warroom" data-p="warroom" id="navwar" hidden><svg class="i" viewBox="0 0 24 24"><path d="M21 12a8 8 0 01-11.6 7.1L4 20l1-4.6A8 8 0 1121 12z"/></svg>War-Room<span class="badge" id="wbadge" style="display:none"></span></a>
   <a href="#mindmap" data-p="mindmap" id="navmind" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5"/><circle cx="4.5" cy="5.5" r="2"/><circle cx="19.5" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M10 10.5L6 7M14 10.5l4-3M10.5 14l-3 3.5"/></svg>Mindmap</a>
   <a href="#profit" data-p="profit" id="navprofit" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5c0-1 1-1.5 2.5-1.5s2.5.6 2.5 1.7c0 2.3-5 1.3-5 3.6 0 1.1 1 1.7 2.5 1.7s2.5-.5 2.5-1.5"/></svg>Profit</a>
+  <a href="#server" data-p="server" id="navserver" hidden><svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>Server</a>
   <a href="#programs" data-p="programs" id="navprog" hidden><svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 10l3 2-3 2M13 14h4"/></svg>Programs</a>
   <a href="#users" data-p="users" id="navusers" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-4 3-6 7-6s7 2 7 6M17 5a3.5 3.5 0 010 7M22 20c0-3-2-5-4-5.5"/></svg>Users</a>
   <a href="#settings" data-p="settings"><svg class="i" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>Settings</a>
@@ -3445,6 +3715,54 @@ const DA={
 "(Your data from before is saved as a safety backup.)": "(Dine data fra før er gemt som en sikkerhedskopi.)",
 "A copy of all your data (orders, history, users, notes, keys) is taken automatically every day. The last 14 are kept in the folder \"backups\" next to dashboard.py. Your .env and secret keys are not included.": "En kopi af alle dine data (ordrer, historik, brugere, noter, keys) tages automatisk hver dag. De seneste 14 gemmes i mappen \"backups\" ved siden af dashboard.py. Din .env og hemmelige nøgler er ikke med.",
 "Saved": "Gemt",
+"Month forecast": "Månedsforecast",
+"Too early in the month.": "For tidligt på måneden.",
+"Server": "Server",
+"Running for": "Kører i",
+"since": "siden",
+"Disk space": "Diskplads",
+"free of": "ledig af",
+"running low": "ved at løbe tør",
+"Memory": "Hukommelse",
+"Latest backup": "Seneste backup",
+"none yet": "ingen endnu",
+"Your data": "Dine data",
+"War-Room file": "War-Room-fil",
+"not managed here": "styres ikke her",
+"Version": "Version",
+"not a git clone": "ikke en git-klon",
+"Computer": "Computer",
+"running": "kører",
+"demo": "demo",
+"d": "d",
+"h": "t",
+"Restart the dashboard": "Genstart dashboardet",
+"Restarting stops the programs and starts everything again. It takes about half a minute. The page reloads itself.": "Genstart stopper programmerne og starter alt igen. Det tager omkring et halvt minut. Siden genindlæser sig selv.",
+"Restart is only possible when the dashboard is started with  py start_all.py  (or the autostart).": "Genstart kan kun bruges, når dashboardet er startet med  py start_all.py  (eller autostart).",
+"Restarting... this page reloads when the dashboard is back.": "Genstarter... siden genindlæser, når dashboardet er tilbage.",
+"Demo: nothing restarted.": "Demo: intet genstartet.",
+"It is taking longer than normal. Check the window on the server.": "Det tager længere end normalt. Kig på vinduet på serveren.",
+"The dashboard was not started with start_all.py, so nothing would start it again. Start it with  py start_all.py  (or the autostart).": "Dashboardet er ikke startet med start_all.py, så intet ville starte det igen. Start det med  py start_all.py  (eller autostart).",
+"Password": "Adgangskode",
+"Old password": "Gammel adgangskode",
+"(at least 8 characters)": "(mindst 8 tegn)",
+"New password again": "Ny adgangskode igen",
+"Change password": "Skift adgangskode",
+"Your other devices are logged out when you change it.": "Dine andre enheder bliver logget ud, når du skifter den.",
+"The new password must be at least 8 characters.": "Den nye adgangskode skal være mindst 8 tegn.",
+"The two new passwords are not the same.": "De to nye adgangskoder er ikke ens.",
+"Password changed. Your other devices are logged out.": "Adgangskoden er skiftet. Dine andre enheder er logget ud.",
+"Password changed.": "Adgangskoden er skiftet.",
+"The old password is not right.": "Den gamle adgangskode er forkert.",
+"Pick a password that is different from the old one.": "Vælg en adgangskode, der er forskellig fra den gamle.",
+"That password is too long.": "Den adgangskode er for lang.",
+"Too many attempts. Try again in a few minutes.": "For mange forsøg. Prøv igen om nogle minutter.",
+"Attach a picture or PDF": "Vedhæft et billede eller PDF",
+"Uploading...": "Uploader...",
+"The file is too big (max 5 MB).": "Filen er for stor (maks. 5 MB).",
+"Only pictures (png, jpg, gif, webp) and PDF files.": "Kun billeder (png, jpg, gif, webp) og PDF-filer.",
+"No file.": "Ingen fil.",
+"Sales left": "Salg tilbage",
 "payout due": "udbetaling forfalden",
 "payout around": "udbetaling ca.",
 "Expected payout": "Forventet udbetaling",
@@ -3456,7 +3774,6 @@ const DA={
 "The dashboard is not starting the programs. Run it with  py dashboard.py  (without --no-programs).": "Dashboardet starter ikke programmerne. Kør det med  py dashboard.py  (uden --no-programs).",
 "stopped": "stoppet",
 "All running": "Alle kører",
-"Running for": "Kører i",
 "Restarting": "Genstarter",
 "File not found": "Filen findes ikke",
 "Stopped, starting again": "Stoppet, starter igen",
@@ -3576,9 +3893,9 @@ function copyText(text,btn){
 }
 
 // ---------- pages ----------
-const PAGES=["overview","sales","history","orders","stock","reviews","keys","warroom","mindmap","profit","programs","users","settings","news"];
-const ADMIN_PAGES=["warroom","mindmap","profit","programs","users"];
-const TITLES={overview:"Overview",sales:"Sales",history:"History",programs:"Programs",orders:"Orders",stock:"Stock",reviews:"Reviews",keys:"Keys",warroom:"War-Room",mindmap:"Mindmap",profit:"Profit",users:"Users",settings:"Settings",news:"What's new"};
+const PAGES=["overview","sales","history","orders","stock","reviews","keys","warroom","mindmap","profit","programs","server","users","settings","news"];
+const ADMIN_PAGES=["warroom","mindmap","profit","programs","server","users"];
+const TITLES={overview:"Overview",sales:"Sales",history:"History",programs:"Programs",server:"Server",orders:"Orders",stock:"Stock",reviews:"Reviews",keys:"Keys",warroom:"War-Room",mindmap:"Mindmap",profit:"Profit",users:"Users",settings:"Settings",news:"What's new"};
 const page=()=>{const h=(location.hash||"#overview").slice(1);return PAGES.includes(h)?h:"overview";};
 const seen={};
 function once(name,key,fn){const k=JSON.stringify(key)+"|"+Math.floor(Date.now()/60000);if(seen[name]===k)return;seen[name]=k;fn();}
@@ -3607,6 +3924,14 @@ function growthInfo(s){
 }
 const grCls=p=>p>=0?"up":"down",grTxt=p=>(p>=0?"▲ +":"▼ −")+fmt(Math.abs(p),0)+"%";
 function growthBadge(s){const g=growthInfo(s);return g?`<span class="gr ${grCls(g.pct)}" title="${esc(t("compared with the same days last month"))}">${grTxt(g.pct)}</span>`:"";}
+function forecastInfo(s){
+ const [y,m,dd]=s.date.split("-").map(Number),dim=new Date(y,m,0).getDate(),key=i=>y+"-"+String(m).padStart(2,"0")+"-"+String(i).padStart(2,"0");
+ if(dd<3)return null;
+ let mtd=0,l7=0;
+ for(let i=1;i<=dd;i++){const a=s.days[key(i)],v=a?(GROSS?a.g:a.a):0;mtd+=v;if(i>dd-7)l7+=v;}
+ const p7=l7/Math.min(7,dd),pm=mtd/dd,rem=dim-dd;
+ return {exp:mtd+(p7+pm)/2*rem,lo:mtd+Math.min(p7,pm)*rem,hi:mtd+Math.max(p7,pm)*rem,mtd,rem};
+}
 function stockValue(d){
  const cv=(a,c)=>RATES[c]&&RATES[MAIN]?a/RATES[c]*RATES[MAIN]:a,fee=(d.sales&&d.sales.fee_percent)||0,uc=d.unitcosts||{};
  let gross=0,profit=0,costed=0,units=0;
@@ -3632,6 +3957,7 @@ function tiles(d){
   +tile("avg",t("Average order"),"t-avg",avg(s.all),t("Today")+": "+(s.today.orders?fmt(mv(avg(s.today))):"-")+" "+cur)
   +(hid("stock")?"":`<div class="tile" data-mod="stock" data-help="t-stock"><div class="l">${t("In stock")}</div><div class="v">${cuHtml("t-stock",d.stock.units,0)} <small>${t("units")}</small></div><div class="s">${plural(d.stock.offers.length,"offer")}</div></div>`);
  if(!hid("stockval")){const sv=stockValue(d);if(sv.units){h+=tile0("stockval",t("Stock value"),"t-stockval",sv.gross,plural(d.stock.offers.length,"offer")+" · "+plural(sv.units,"unit")+(sv.costed?" · "+t("profit")+" "+fmt(mv(sv.profit))+" "+cur:""));}}
+ if(!hid("forecast")){const f=forecastInfo(s);if(f)h+=tile0("forecast",t("Month forecast"),"t-forecast",f.exp,fmt(mv(f.lo),0)+" – "+fmt(mv(f.hi),0)+" "+cur+" · "+plural(f.rem,"day")+" "+t("left"));}
  if(d.profit)h+=tile("profit",t("Profit this month"),"t-profit",d.profit.month,t("All time")+": "+fmt(mv(d.profit.all))+" "+cur);
  if(!hid("lastorder")){const lo=d.orders[0],mins=lo?(Date.now()-new Date(lo.time))/6e4:0,cls=!lo?"":mins>360?"bad":mins>120?"warn":"";
   h+=`<div class="tile" data-mod="lastorder" data-help="lastorder"><div class="l">${t("Latest order")}</div><div class="v ${cls}">${lo?esc(waited(lo.time)):"-"}${lo?` <small>${t("ago")}</small>`:""}</div><div class="s">${lo?esc(lo.buyer)+" · "+esc(tm(lo.time)):t("No orders yet.")}</div></div>`;}
@@ -3734,6 +4060,7 @@ function salesTiles(d){
  $("stiles").innerHTML=
   `<div class="tile" data-help="s-avg"><div class="l">${t("Average order")}</div><div class="v">${cuHtml("s-avg",mv(avg(s.all)))} <small>${cur}</small></div><div class="s">${t("This month")}: ${s.month.orders?fmt(mv(avg(s.month))):"-"} ${cur}</div></div>`
   +`<div class="tile" data-help="s-best"><div class="l">${t("Best day ever")} ${recBadge(r.day.record)}</div><div class="v">${cuHtml("s-best",mv(bd?dayAmt(bd):0))} <small>${cur}</small></div><div class="s">${r.day.key?esc(dayLabel2(r.day.key)):"-"}${r.day.orders?" · "+plural(r.day.orders,"order"):""}</div></div>`
+  +(()=>{const f=forecastInfo(s);return `<div class="tile" data-help="s-forecast"><div class="l">${t("Month forecast")}</div><div class="v">${f?fmt(mv(f.exp),0):"-"} <small>${cur}</small></div><div class="s">${f?fmt(mv(f.lo),0)+" – "+fmt(mv(f.hi),0)+" "+cur+" · "+plural(f.rem,"day")+" "+t("left"):t("Too early in the month.")}</div></div>`;})()
   +(()=>{const g=growthInfo(s);return `<div class="tile" data-help="s-growth"><div class="l">${t("Growth this month")}</div><div class="v ${g?(g.pct>=0?"":"bad"):""}">${g?(g.pct>=0?"+":"−")+fmt(Math.abs(g.pct),0):"-"} <small>%</small></div><div class="s">${g?fmt(mv(g.cur))+" "+t("against")+" "+fmt(mv(g.prev))+" "+cur+" · "+t("same days last month"):t("Not enough history yet.")}</div></div>`;})()
   +`<div class="tile" data-help="s-ords"><div class="l">${t("Orders this month")}</div><div class="v">${cuHtml("s-ords",s.month.orders,0)}</div><div class="s">${t("All time")}: ${fmt(s.all.orders,0)}</div></div>`;
  runCountUps($("stiles"));
@@ -3851,7 +4178,7 @@ const CURRENCIES_ALL=()=>[MAIN,"DKK","USD","EUR"];
 const K0=()=>[LANG,HIDE];
 function render(d){
  isAdmin=d.user.role==="admin";
- ["navusers","navwar","navmind","navprofit","navprog"].forEach(id=>{$(id).hidden=!isAdmin;});
+ ["navusers","navwar","navmind","navprofit","navprog","navserver"].forEach(id=>{$(id).hidden=!isAdmin;});
  if(ADMIN_PAGES.includes(page())&&!isAdmin){location.hash="#overview";return;}
  MAIN=d.rates.base;RATES=d.rates.rates;RATES_LIVE=d.rates.live;RATES_DATE=d.rates.date;
  if(!prefsApplied){prefsApplied=true;applyServerPrefs(d.prefs);translateStatic();setTitle();settingsUi();}
@@ -4138,7 +4465,7 @@ function settingsUi(){
  if(isAdmin&&Date.now()-bkAt>20000)loadBackups();$("backupbox").style.display=isAdmin?"":"none";
  curUi();tglUi();menuUi();if(document.activeElement!==$("payout"))$("payout").value=PREFS.payout==null?5:PREFS.payout;
  $("bgSeg").innerHTML=BGS.map(b=>`<button type="button" class="chip${(PREFS.bg||"")===b[0]?" on":""}" data-bg="${b[0]}">${esc(t(b[1]))}</button>`).join("");
- const defs=[["today","Today"],["month","This month"],["all","All time"],["avg","Average order"],["stock","In stock"],["stockval","Stock value"],["profit","Profit this month",1],["taxpot","Tax pot",1],["lastorder","Latest order"],["revrate","Reviews per order"],["chart","Sales per month"],["latest","Latest orders"],["pending","Waiting to be completed"],["reviews","Reviews"],["keys","Keys left"],["stockp","Stock panel"],["status","Eldorado connection"],["others","Other currencies"]];
+ const defs=[["today","Today"],["month","This month"],["all","All time"],["avg","Average order"],["stock","In stock"],["stockval","Stock value"],["forecast","Month forecast"],["profit","Profit this month",1],["taxpot","Tax pot",1],["lastorder","Latest order"],["revrate","Reviews per order"],["chart","Sales per month"],["latest","Latest orders"],["pending","Waiting to be completed"],["reviews","Reviews"],["keys","Keys left"],["stockp","Stock panel"],["status","Eldorado connection"],["others","Other currencies"]];
  $("tilesel").innerHTML=defs.filter(x=>!x[2]||isAdmin).map(x=>`<label class="tgl"><div>${esc(t(x[1]))}</div><input type="checkbox" data-tile="${x[0]}"${hid(x[0])?"":" checked"}></label>`).join("");
  $("profbox").style.display=isAdmin?"":"none";$("taxbox").style.display=isAdmin?"":"none";
  if(document.activeElement!==$("pemoji"))$("pemoji").value=PREFS.emoji||"";
@@ -4349,13 +4676,14 @@ function translateStatic(){
 
 // ================= page switching, loading =================
 function setTitle(){const p=page();$("title").textContent=t(TITLES[p]);document.title=t(TITLES[p])+" · "+SHOP;}
-const TT={orders:0,profit:0,users:0,dev:0,hist:0};
+const TT={srv:0,orders:0,profit:0,users:0,dev:0,hist:0};
 function pageLoad(force){
  const p=page(),now=Date.now();
  if(p==="orders"&&(force||now-TT.orders>4500)){TT.orders=now;loadOrders();}
  if(p==="profit"&&isAdmin&&(force||now-TT.profit>15000)){TT.profit=now;loadProfit();}
  if(p==="history"&&(force||now-TT.hist>6000)){TT.hist=now;loadHistory();}
  if(p==="programs"&&isAdmin&&force){loadPrograms();}
+ if(p==="server"&&isAdmin&&(force||now-TT.srv>8000)){TT.srv=now;loadServer();}
  if(p==="users"&&isAdmin&&(force||now-TT.users>10000)){TT.users=now;users();loadDevices();}
  if(p==="settings"&&(force||now-TT.dev>15000)){TT.dev=now;loadDevices();}
  if(p==="settings")settingsUi();
@@ -4400,8 +4728,8 @@ async function refreshAll(){const p=$("ptr");p.classList.add("spin");p.style.top
 })();
 
 // ================= overview editing =================
-const OV_DEFAULT=["today","month","all","avg","stock","stockval","profit","lastorder","revrate","others","chart","latest","pending","reviews","keys","stockp","status"];
-const OV_NAMES={today:"Today",month:"This month",all:"All time",avg:"Average order",stock:"In stock",stockval:"Stock value",profit:"Profit this month",lastorder:"Latest order",revrate:"Reviews per order",others:"Other currencies",chart:"Sales per month",latest:"Latest orders",pending:"Waiting to be completed",reviews:"Reviews",keys:"Keys left",stockp:"Stock panel",status:"Eldorado connection"};
+const OV_DEFAULT=["today","month","all","avg","stock","stockval","forecast","profit","lastorder","revrate","others","chart","latest","pending","reviews","keys","stockp","status"];
+const OV_NAMES={today:"Today",month:"This month",all:"All time",avg:"Average order",stock:"In stock",stockval:"Stock value",forecast:"Month forecast",profit:"Profit this month",lastorder:"Latest order",revrate:"Reviews per order",others:"Other currencies",chart:"Sales per month",latest:"Latest orders",pending:"Waiting to be completed",reviews:"Reviews",keys:"Keys left",stockp:"Stock panel",status:"Eldorado connection"};
 let OVEDIT=false,OVSEL="";
 function ovOrder(){const o=(PREFS.ovorder||[]).filter(x=>OV_DEFAULT.includes(x));return [...o,...OV_DEFAULT.filter(x=>!o.includes(x))];}
 function ovStyle(){let st=$("ovstyle");if(!st){st=document.createElement("style");st.id="ovstyle";document.head.appendChild(st);}
@@ -4463,6 +4791,58 @@ $("bklist").addEventListener("click",async e=>{const b=e.target.closest("[data-b
   $("bkmsg").textContent=r.ok?t("Restored")+" "+plural(j.restored,"file")+". "+t("Restart the dashboard now so everything is read again.")+" "+t("(Your data from before is saved as a safety backup.)"):(j.error||t("Could not restore."));
  }catch(x){$("bkmsg").textContent=t("Could not restore.");}
  b.disabled=false;b.textContent=t("Restore");loadBackups();});
+
+// ================= server page, restart, password =================
+const gb=n=>n==null?"-":(n/1073741824>=10?(n/1073741824).toFixed(0):(n/1073741824).toFixed(1))+" GB";
+const mbs=n=>n>1048576?(n/1048576).toFixed(1)+" MB":Math.max(1,Math.round((n||0)/1024))+" KB";
+function upText(sec){const d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60);return d?d+" "+t("d")+" "+h+" "+t("h"):h?h+" "+t("h")+" "+m+" min":m+" min";}
+async function loadServer(){
+ if(!isAdmin)return;
+ try{const r=await fetch("/api/server");if(!r.ok)return;const j=await r.json();
+  const row=(l,v,sub)=>`<div class="r1"><div>${t(l)}${sub?`<small>${sub}</small>`:""}</div><div class="v">${v}</div></div>`;
+  const bar=(used,total,warn)=>`<div class="qbar ${warn?"warn":""}"><i style="width:${Math.min(100,Math.round(used*100/total))}%"></i></div>`;
+  let h=row("Running for",esc(upText(j.uptime)),esc(t("since"))+" "+esc(full(j.started)));
+  if(j.disk){const freePct=j.disk.free*100/j.disk.total,low=freePct<10||j.disk.free<5*1073741824;
+   h+=`<div class="r1"><div>${t("Disk space")}<small>${gb(j.disk.free)} ${t("free of")} ${gb(j.disk.total)}</small></div><div class="v">${low?`<span class="pill warn">${t("running low")}</span>`:`<span class="pill good">OK</span>`}${bar(j.disk.used,j.disk.total,low)}</div></div>`;}
+  if(j.mem){const used=j.mem.total-j.mem.free,low=j.mem.free*100/j.mem.total<10;
+   h+=`<div class="r1"><div>${t("Memory")}<small>${gb(j.mem.free)} ${t("free of")} ${gb(j.mem.total)}</small></div><div class="v">${low?`<span class="pill warn">${t("running low")}</span>`:`<span class="pill good">OK</span>`}${bar(used,j.mem.total,low)}</div></div>`;}
+  const old=j.backups.last&&(Date.now()-new Date(j.backups.last))>36*36e5;
+  h+=row("Latest backup",j.backups.last?`<span class="pill ${old?"warn":"good"}">${esc(ago(j.backups.last))}</span>`:`<span class="pill warn">${t("none yet")}</span>`,plural(j.backups.n,"backup")+" · "+mbs(j.backups.size));
+  h+=row("Your data",mbs(j.data),j.files.n?plural(j.files.n,"War-Room file")+" · "+mbs(j.files.size):"");
+  h+=row("Programs",j.programs.managed?`<span class="pill ${j.programs.running===j.programs.total?"good":"warn"}">${j.programs.running} / ${j.programs.total} ${t("running")}</span>`:t("not managed here"));
+  h+=row("Version",j.commit?esc(j.commit.hash):"-",j.commit?esc(full(j.commit.date))+" · "+esc(j.commit.subject):esc(t("not a git clone")));
+  h+=row("Computer",esc(j.system),"Python "+esc(j.python));
+  $("srvbox").innerHTML=h;$("srvsum").textContent=j.demo?t("demo"):"";
+  $("srvrestart").disabled=!j.supervised;
+  if(!j.supervised)$("srvmsg").textContent=t("Restart is only possible when the dashboard is started with  py start_all.py  (or the autostart).");
+ }catch(e){}
+}
+let srvArm=false;
+$("srvrestart").onclick=async()=>{
+ const b=$("srvrestart");
+ if(!srvArm){srvArm=true;b.textContent=t("Sure?");setTimeout(()=>{srvArm=false;b.textContent=t("Restart the dashboard");},4000);return;}
+ srvArm=false;b.disabled=true;
+ try{const r=await post("/api/restart",{});const j=await r.json();
+  if(!r.ok){$("srvmsg").textContent=t(j.error||"Error");b.disabled=false;b.textContent=t("Restart the dashboard");return;}
+  if(j.demo){$("srvmsg").textContent=t("Demo: nothing restarted.");b.disabled=false;b.textContent=t("Restart the dashboard");return;}
+ }catch(e){}
+ $("srvmsg").textContent=t("Restarting... this page reloads when the dashboard is back.");
+ const t0=Date.now();await new Promise(r=>setTimeout(r,4000));
+ const tick=async()=>{try{const r=await fetch("/api/server",{cache:"no-store"});if(r.ok){location.reload();return;}}catch(e){}
+  if(Date.now()-t0<120000)setTimeout(tick,2000);else{$("srvmsg").textContent=t("It is taking longer than normal. Check the window on the server.");b.disabled=false;b.textContent=t("Restart the dashboard");}};
+ tick();
+};
+$("pwsave").onclick=async()=>{
+ const o=$("pwold").value,n=$("pwnew").value,n2=$("pwnew2").value,m=$("pwmsg");
+ if(n.length<8){m.textContent=t("The new password must be at least 8 characters.");return;}
+ if(n!==n2){m.textContent=t("The two new passwords are not the same.");return;}
+ $("pwsave").disabled=true;
+ try{const r=await post("/api/password",{old:o,new:n});const j=await r.json();
+  if(r.ok){$("pwold").value=$("pwnew").value=$("pwnew2").value="";m.textContent=t("Password changed. Your other devices are logged out.");toast(t("Password"),t("Password changed."));}
+  else m.textContent=t(j.error||"Error");
+ }catch(e){m.textContent=t("Could not reach the server.");}
+ $("pwsave").disabled=false;
+};
 
 // ---------- War-Room ----------
 let wrStyles={},wrPeople=[];let wrLast=0,wrRev=-1,wrMsgs=[],wrSeen=null,wrMe="",wrStarted=false,wrEdit=null,wrSure=null,wrUnreadTitle=0;
@@ -4533,13 +4913,13 @@ document.addEventListener("keydown",()=>audio(),{once:true});
 function wrAlert(msgs){
  const others=msgs.filter(m=>m.user!==wrMe);if(!others.length||!PREFS.notify.warroom)return;
  ding();
- others.filter(m=>(m.mentions||[]).includes(wrMe)).forEach(m=>toast(m.user+" "+t("mentioned you"),m.text.slice(0,90),()=>{location.hash="#warroom";}));
+ others.filter(m=>(m.mentions||[]).includes(wrMe)).forEach(m=>toast(m.user+" "+t("mentioned you"),(m.text||("📎 "+(m.file&&m.file.name||""))).slice(0,90),()=>{location.hash="#warroom";}));
  try{if(navigator.vibrate)navigator.vibrate(80);}catch(e){}
  const away=document.hidden||page()!=="warroom";
  if(away){wrUnreadTitle+=others.length;document.title="("+wrUnreadTitle+") "+t("War-Room");}
  if(away&&noteOn&&notifyOK()&&Notification.permission==="granted"){
   const m=others[others.length-1];
-  const title="War-Room · "+m.user,opts={body:m.text.slice(0,140),tag:"warroom",renotify:true,icon:"/icon-192.png",badge:"/icon-192.png"};
+  const title="War-Room · "+m.user,opts={body:(m.text||("📎 "+(m.file&&m.file.name||""))).slice(0,140),tag:"warroom",renotify:true,icon:"/icon-192.png",badge:"/icon-192.png"};
   const plain=()=>{try{const n=new Notification(title,opts);n.onclick=()=>{window.focus();location.hash="#warroom";n.close();};}catch(e){}};
   if(navigator.serviceWorker&&navigator.serviceWorker.getRegistration)navigator.serviceWorker.getRegistration().then(r=>r?r.showNotification(title,opts):plain()).catch(plain);else plain();
  }
@@ -4550,6 +4930,12 @@ function mentionHtml(text){
  let h=esc(text);if(!wrPeople.length)return h;
  const names=wrPeople.map(n=>n.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).sort((a,b)=>b.length-a.length).join("|");
  return h.replace(new RegExp("(^|[^\\w@])@("+names+")(?![\\w-])","gi"),(m,p,n)=>p+'<span class="men">@'+n+"</span>");
+}
+function fileHtml(m){
+ const f=m.file;if(!f||!/^[0-9a-f]{32}\.(png|jpg|gif|webp|pdf)$/.test(f.id||""))return "";
+ const u="/api/warroom/file/"+f.id,sz=f.size>1048576?(f.size/1048576).toFixed(1)+" MB":Math.max(1,Math.round(f.size/1024))+" KB";
+ return f.kind==="image"?`<a href="${u}" target="_blank" rel="noopener"><img class="wimg" src="${u}" alt="${esc(f.name)}" loading="lazy"></a>`
+  :`<a class="wpdf" href="${u}" target="_blank" rel="noopener">📄 ${esc(f.name)} · ${sz}</a>`;
 }
 function wrRender(forceBottom){
  const box=$("msgs");if(!box)return;
@@ -4562,7 +4948,7 @@ function wrRender(forceBottom){
   const head=m.user!==lastUser||!lastUser?`<div class="w">${nameHtml(m.user,mine)} · ${esc(hhmm(m.time))}</div>`:"";
   let body;
   if(editing)body=`<div class="bub"><div class="editbox"><textarea id="ed-${m.id}" rows="2" maxlength="1000">${esc(wrEdit.text)}</textarea><div class="row"><button class="btn" data-a="cancel">${t("Cancel")}</button><button class="btn primary" data-a="save" data-id="${m.id}">${t("Save")}</button></div></div></div>`;
-  else body=`<div class="bub" title="${esc(full(m.time))}">${mentionHtml(m.text)}${m.edited?'<span class="edited">('+t("edited")+')</span>':""}</div>`
+  else body=`<div class="bub" title="${esc(full(m.time))}">${m.text?mentionHtml(m.text):""}${fileHtml(m)}${m.edited?'<span class="edited">('+t("edited")+')</span>':""}</div>`
    +(mine?`<div class="acts"><button data-a="edit" data-id="${m.id}">${t("Edit")}</button><button class="del${wrSure===m.id?" sure":""}" data-a="del" data-id="${m.id}">${wrSure===m.id?t("Sure? Delete"):t("Delete")}</button></div>`:"");
   html+=`<div class="m${mine?" mine":""}${tome?" tome":""}">${head}${body}</div>`;
   lastUser=m.user;
@@ -4575,7 +4961,7 @@ $("msgs").onclick=async e=>{
  const b=e.target.closest("button[data-a]");if(!b)return;const a=b.dataset.a,id=+b.dataset.id;
  if(a==="edit"){const m=wrMsgs.find(x=>x.id===id);if(m){wrEdit={id,text:m.text};wrSure=null;wrRender();}}
  else if(a==="cancel"){wrEdit=null;wrRender();}
- else if(a==="save"){const t=$("ed-"+id).value.trim();if(!t)return;
+ else if(a==="save"){const t=$("ed-"+id).value.trim(),m0=wrMsgs.find(x=>x.id===id);if(!t&&!(m0&&m0.file))return;
   const r=await post("/api/warroom/"+id,{text:t},"PATCH");const j=await r.json();
   if(r.ok){wrEdit=null;await wrPoll();}else $("wmsg").textContent=j.error||"Error";}
  else if(a==="del"){
@@ -4638,6 +5024,24 @@ let typedAt=0;
 $("wt").oninput=()=>{const ta=$("wt");ta.style.height="auto";ta.style.height=Math.min(120,ta.scrollHeight)+"px";
  if(ta.value.trim()&&Date.now()-typedAt>2500){typedAt=Date.now();post("/api/warroom/typing").catch(()=>{});}};
 setTimeout(()=>{if(noteOn&&typeof Notification!=="undefined"&&Notification.permission==="granted")pushSubscribe();},1500);setTimeout(wrLoop,800);
+
+// ---- pictures and PDFs in the War-Room ----
+async function wrUpload(file){
+ if(!file)return;
+ if(file.size>5*1048576){$("wmsg").textContent=t("The file is too big (max 5 MB).");return;}
+ $("wsend").disabled=true;$("wattach").disabled=true;$("wmsg").textContent=t("Uploading...");
+ const fd=new FormData();fd.append("file",file,file.name||"picture.png");fd.append("text",$("wt").value.trim());
+ try{const r=await fetch("/api/warroom/upload",{method:"POST",headers:{"X-Requested-With":"dashboard"},body:fd});const j=await r.json();
+  if(r.ok){$("wt").value="";$("wt").style.height="";$("wmsg").textContent="";await wrPoll();$("msgs").scrollTop=$("msgs").scrollHeight;}
+  else $("wmsg").textContent=t(j.error||"Error");
+ }catch(e){$("wmsg").textContent=t("Could not reach the server.");}
+ $("wsend").disabled=false;$("wattach").disabled=false;$("wfile").value="";
+}
+$("wattach").onclick=()=>$("wfile").click();
+$("wfile").onchange=e=>wrUpload(e.target.files[0]);
+$("wt").addEventListener("paste",e=>{const f=[...(e.clipboardData&&e.clipboardData.files||[])].find(x=>/^image\//.test(x.type));if(f){e.preventDefault();wrUpload(f);}});
+$("msgs").addEventListener("dragover",e=>{if(e.dataTransfer&&[...e.dataTransfer.types].includes("Files"))e.preventDefault();});
+$("msgs").addEventListener("drop",e=>{const f=e.dataTransfer&&e.dataTransfer.files[0];if(f){e.preventDefault();wrUpload(f);}});
 
 // ---------- Mindmap ----------
 const MMC={yellow:"#ffe27a",green:"#9be8c0",blue:"#9cc9ff",pink:"#ffb3c7",orange:"#ffc58a",purple:"#d4b8ff"},MMCN=Object.keys(MMC);
@@ -4748,6 +5152,8 @@ const HELP={
  "t-all":["Everything counted since the dashboard started following your orders.","Alt der er talt med, siden dashboardet begyndte at følge dine ordrer."],
  "t-avg":["The average sale: the total divided by the number of orders.","Gennemsnitligt salg: samlet beløb delt med antal ordrer."],
  "t-stockval":["What everything you have for sale is worth at your listed prices (items and accounts). Add what each unit cost you on the Stock page to see the expected profit after Eldorado fees.","Hvad alt, du har til salg, er værd til dine priser (items og konti). Skriv hvad hver enhed kostede dig på Lager-siden, så ser du forventet profit efter Eldorados gebyr."],
+ "t-forecast":["Where this month ends if the pace holds: average of this month's daily pace and the last 7 days. The range goes from the slower to the faster of the two.","Hvor måneden ender, hvis tempoet holder: gennemsnit af månedens daglige tempo og de sidste 7 dage. Spændet går fra den langsomste til den hurtigste af de to."],
+ "s-forecast":["Where this month ends if the pace holds: average of this month's daily pace and the last 7 days.","Hvor måneden ender, hvis tempoet holder: gennemsnit af månedens daglige tempo og de sidste 7 dage."],
  "t-stock":["Units in stock across all your offers on Eldorado.","Antal enheder på lager på tværs af alle dine tilbud på Eldorado."],
  "t-profit":["Sales after fees minus your costs (VPS, keys and so on) this month. Add costs on the Profit page.","Salg efter gebyrer minus dine omkostninger (VPS, keys osv.) denne måned. Tilføj omkostninger på Profit-siden."],
  "taxpot":["A joke counter: the percent you set in Settings, of your profit, in kroner. It shows how much tax we would have paid.","En joke-tæller: den procent, du har sat i Indstillinger, af din profit, i kroner. Viser hvor meget skat vi ville have betalt."],
