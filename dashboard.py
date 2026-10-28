@@ -583,9 +583,11 @@ def poll_loop():
                 failed = True
                 code = getattr(getattr(e, "response", None), "status_code", None)
                 with _cache_lock:
-                    _cache["errors"][name] = f"API error {code}" if code else type(e).__name__
+                    msg = f"API error {code}" if code else type(e).__name__
                     st = _status.setdefault(name, {"ok": None, "err": "", "fails": 0})
-                    st["err"], st["fails"] = _cache["errors"][name], st["fails"] + 1
+                    st["err"], st["fails"] = msg, st["fails"] + 1
+                    if st["fails"] >= 3:          # one hiccup from Eldorado is not shown, three in a row is
+                        _cache["errors"][name] = msg
             except Exception as e:  # keep the other sections alive
                 failed = True
                 with _cache_lock:
