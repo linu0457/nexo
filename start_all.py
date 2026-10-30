@@ -15,10 +15,23 @@ from pathlib import Path
 
 here = Path(__file__).resolve().parent
 env = dict(os.environ, NEXO_SUPERVISED="1")
+
+
+def chosen():
+    """Which dashboard file to run. valgt_version.txt (made by skift_til_3d.bat / skift_til_gammel.bat) names it; default dashboard.py"""
+    try:
+        name = (here / "valgt_version.txt").read_text(encoding="utf-8-sig").strip()
+        if name in ("dashboard.py", "dashboard_3d.py") and (here / name).exists():
+            return name
+    except OSError:
+        pass
+    return "dashboard.py"
+
+
 code = 0
 try:
     while True:
-        code = subprocess.call([sys.executable, "-u", str(here / "dashboard.py"), *sys.argv[1:]], cwd=str(here), env=env)
+        code = subprocess.call([sys.executable, "-u", str(here / chosen()), *sys.argv[1:]], cwd=str(here), env=env)
         if code != 3:
             break
         print("\n--- Restarting the dashboard ---\n", flush=True)
