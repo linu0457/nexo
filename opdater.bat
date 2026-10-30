@@ -3,7 +3,8 @@ cd /d "%~dp0"
 title Opdater Nexo-Shop
 echo.
 echo === Henter nyeste version fra GitHub ===
-git checkout -- dashboard_3d.py dashboard_ny.py >nul 2>&1
+git config core.autocrlf false >nul 2>&1
+git checkout -- dashboard_3d.py dashboard_ny.py start_all.py >nul 2>&1
 git pull --ff-only
 if errorlevel 1 (
   echo.
