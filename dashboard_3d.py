@@ -3619,6 +3619,8 @@ html[data-font=tech] .ck-big,html[data-font=retro] .ck-big{letter-spacing:-.03em
 .fn3d button.tg3d i::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:var(--muted);transition:transform .25s var(--spring),background .25s}
 .fn3d button.tg3d.on i{background:var(--accentbg);border-color:var(--accent)}
 .fn3d button.tg3d.on i::after{transform:translateX(14px);background:var(--accent)}
+
+.panel[data-help="fees"]{display:none!important}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
