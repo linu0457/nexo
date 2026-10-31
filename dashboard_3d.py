@@ -2644,6 +2644,8 @@ def font_file(name):
 
 
 SPINNER_FILE = Path(__file__).resolve().parent / "spinner_photo.img"
+SPINNER_OFF = Path(__file__).resolve().parent / "spinner_photo.off"      # marker: the user chose the diamond
+SPINNER_DEFAULT = Path(__file__).resolve().parent / "spinner_default.jpg"  # picture that ships with the dashboard
 _demo_spinner = {}
 
 
@@ -2654,7 +2656,14 @@ def api_spinner():
     if bad:
         return bad
     if request.method == "GET":
-        data = _demo_spinner.get("d") if DEMO else (SPINNER_FILE.read_bytes() if SPINNER_FILE.is_file() else None)
+        if DEMO:
+            data = _demo_spinner.get("d") or (None if _demo_spinner.get("off") or not SPINNER_DEFAULT.is_file() else SPINNER_DEFAULT.read_bytes())
+        elif SPINNER_OFF.is_file():
+            data = None
+        elif SPINNER_FILE.is_file():
+            data = SPINNER_FILE.read_bytes()
+        else:
+            data = SPINNER_DEFAULT.read_bytes() if SPINNER_DEFAULT.is_file() else None
         kind = _wr_kind(data) if data else None
         if not data or kind not in ("png", "jpg", "webp", "gif"):
             return Response(status=204)
@@ -2662,9 +2671,15 @@ def api_spinner():
                         headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"})
     if request.method == "DELETE":
         _demo_spinner.clear()
-        if not DEMO:
+        if DEMO:
+            _demo_spinner["off"] = True
+        else:
             try:
                 SPINNER_FILE.unlink()
+            except OSError:
+                pass
+            try:
+                SPINNER_OFF.write_text("1")
             except OSError:
                 pass
         return jsonify(ok=True)
@@ -2677,11 +2692,16 @@ def api_spinner():
     if _wr_kind(data) not in ("png", "jpg", "webp", "gif"):
         return jsonify(error="Only pictures (png, jpg, gif, webp)."), 400
     if DEMO:
+        _demo_spinner.clear()
         _demo_spinner["d"] = data
     else:
         tmp = SPINNER_FILE.with_suffix(".tmp")
         tmp.write_bytes(data)
         tmp.replace(SPINNER_FILE)
+        try:
+            SPINNER_OFF.unlink()
+        except OSError:
+            pass
     return jsonify(ok=True)
 
 
