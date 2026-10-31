@@ -3689,7 +3689,7 @@ html[data-font=tech] .ck-big,html[data-font=retro] .ck-big{letter-spacing:-.03em
 .tile[data-mod="avg"],.tile[data-mod="revrate"],.tile[data-mod="forecast"],.tile[data-help="s-avg"],.tile[data-help="s-forecast"]{display:none!important}
 
 /* ---------- spinning picture (instead of the diamond) ---------- */
-.ph3d{position:absolute;inset:0;display:grid;place-items:center;perspective:1100px;touch-action:pan-y;cursor:grab}
+.ph3d{position:absolute;inset:0;display:grid;place-items:center;perspective:1500px;touch-action:pan-y;cursor:grab}
 .ph3d[hidden]{display:none}
 .ph3d-s{position:relative;width:var(--w);height:var(--h);transform-style:preserve-3d;will-change:transform}
 .pf{position:absolute;backface-visibility:hidden;background-color:#0b1220}
@@ -3705,6 +3705,9 @@ html[data-font=tech] .ck-big,html[data-font=retro] .ck-big{letter-spacing:-.03em
 .ph3d-s{filter:drop-shadow(0 0 26px color-mix(in srgb,var(--pc) 45%,transparent))}
 .ph3d-sh{position:absolute;left:50%;bottom:8%;width:min(60%,260px);height:26px;transform:translateX(-50%) scaleX(var(--sh,1));border-radius:50%;background:radial-gradient(closest-side,color-mix(in srgb,var(--pc) 45%,transparent),transparent);filter:blur(6px);pointer-events:none}
 .ck-gem.hasph #gem,.ck-gem.hasph .ck-hint{display:none}
+
+.ck-gem.hasph{min-height:410px}
+@media(max-width:820px){.ck-gem.hasph{min-height:340px}}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
@@ -6804,9 +6807,9 @@ const wrap=document.createElement("div");wrap.className="ph3d";wrap.hidden=true;
 wrap.innerHTML='<div class="ph3d-s"><div class="pf pf-f"></div><div class="pf pf-b"></div><div class="pf pf-l"></div><div class="pf pf-r"></div><div class="pf pf-t"></div><div class="pf pf-d"></div><div class="pf-sheen"></div></div><div class="ph3d-sh"></div>';
 box.appendChild(wrap);
 const slab=q(".ph3d-s",wrap);
-let ry=-.4,vy=RM?0:.7,drag=false,lx=0,url=null,on=false,last=performance.now(),W=170,H=300,D=22;
-function dims(){const r=box.getBoundingClientRect();return Math.max(280,Math.min(r.height-40,420));}
-function layout(ar){H=dims();W=Math.round(H*Math.min(1.1,Math.max(.5,ar)));D=Math.round(Math.max(14,H*.06));
+let AR=.5625,ry=-.4,vy=RM?0:.7,drag=false,lx=0,url=null,on=false,last=performance.now(),W=170,H=300,D=22;
+function dims(){return innerWidth>820?330:270;}
+function layout(ar){AR=ar||AR;H=dims();W=Math.round(H*Math.min(1.1,Math.max(.5,ar)));D=Math.round(Math.max(14,H*.06));
  wrap.style.setProperty("--w",W+"px");wrap.style.setProperty("--h",H+"px");wrap.style.setProperty("--d",D+"px");}
 function show(u,ar){url=u;layout(ar);
  qa(".pf-f,.pf-b",wrap).forEach(e=>e.style.backgroundImage="url("+u+")");
@@ -6829,7 +6832,8 @@ function frame(t){requestAnimationFrame(frame);if(!on)return;const r=wrap.getBou
  const cs=Math.abs(Math.cos(ry));wrap.style.setProperty("--sh",(.45+.55*cs).toFixed(2));
  slab.style.setProperty("--sx",(Math.sin(ry)*60).toFixed(1)+"%");}
 requestAnimationFrame(t=>{last=t;frame(t);});
-addEventListener("resize",()=>{if(on&&url){const im=new Image();im.onload=()=>layout(im.naturalWidth/im.naturalHeight);im.src=url;}});
+if(window.ResizeObserver)new ResizeObserver(()=>{if(on&&box.getBoundingClientRect().height>0)layout(AR);}).observe(box);
+addEventListener("resize",()=>{if(on)layout(AR);});
 
 // ---------- settings: choose / remove the picture ----------
 const st=q("#look3d");
