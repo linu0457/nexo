@@ -3496,7 +3496,7 @@ body.ovedit #ovg [data-mod].drag{animation:none}
 .ck-big small{font:700 clamp(16px,1.8vw,24px) Manrope;letter-spacing:0;color:var(--muted);padding-bottom:.55em;text-shadow:none}
 .odo{display:inline-flex;height:1em;overflow:hidden;line-height:1}
 .odo>span{display:inline-block;height:1em;overflow:hidden}
-.odo>span>b{display:flex;flex-direction:column;font-weight:inherit;transition:transform 1.4s cubic-bezier(.16,1,.3,1);transform:translateY(calc(var(--d,0)*-1em))}
+.odo>span>b{display:flex;flex-direction:column;font-weight:inherit;transition:transform .7s cubic-bezier(.16,1,.3,1);transform:translateY(calc(var(--d,0)*-1em))}
 .odo>span>b>i{display:block;height:1em;font-style:normal;line-height:1}
 .ck-sub{font-size:15px;color:var(--ink2);margin-top:6px;font-weight:600}
 .ck-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
@@ -4261,6 +4261,8 @@ const DA={
 "Drag the diamond": "Træk i diamanten",
 "3D sales per month": "3D-salg pr. måned",
 "3D stock": "3D-lager",
+"This picture could not be read. Try a png or jpg.": "Billedet kunne ikke læses. Prøv en png eller jpg.",
+"only admin": "kun admin",
 "Spinning picture": "Drejende billede",
 "Choose picture": "Vælg billede",
 "Replaces the diamond": "Erstatter diamanten",
@@ -6470,13 +6472,16 @@ function Boxes3D(host,opts){
  let data=[],t0=performance.now(),ay=-.4,ax=.55,vy=0,idle=0,drag=false,lx=0,ly=0,hover=-1,mxp=0,myp=0,run=false,base=[56,189,248],tick=0,vis=false;
  function size(){const r=cv.getBoundingClientRect();D=Math.min(devicePixelRatio||1,2);W=Math.max(10,r.width);H=Math.max(10,r.height);cv.width=Math.round(W*D);cv.height=Math.round(H*D);g.setTransform(D,0,0,D,0,0);}
  const ease=x=>{const c1=1.7,c3=c1+1;return x<=0?0:x>=1?1:1+c3*Math.pow(x-1,3)+c1*Math.pow(x-1,2);};
- function setData(d){const changed=JSON.stringify(d.map(x=>[x.label,x.value]))!==JSON.stringify(data.map(x=>[x.label,x.value]));data=d;if(changed)t0=performance.now();}
+ let sv=[],lastT=0;
+ function setData(d){const lab=x=>JSON.stringify(x.map(y=>y.label)),same=lab(d)===lab(data);data=d;if(!same){t0=performance.now();sv=d.map(x=>x.value);}}
  let polys=[];
  function frame(t){
   g.clearRect(0,0,W,H);polys=[];
   if(!(tick++%30)){const a=getComputedStyle(document.body).getPropertyValue("--pc").trim();if(a)base=hex2rgb(a);}
   const n=data.length;if(!n){return;}
-  const mxv=Math.max(1e-9,...data.map(x=>x.value));
+  const dt=Math.min(64,t-(lastT||t));lastT=t;const kk=1-Math.exp(-dt/70);
+  data.forEach((x,i)=>{sv[i]=sv[i]==null?x.value:sv[i]+(x.value-sv[i])*kk;if(Math.abs(x.value-sv[i])<1e-6*Math.max(1,Math.abs(x.value)))sv[i]=x.value;});
+  const mxv=Math.max(1e-9,...sv);
   const O=opts,span=O.span||Math.max(6,n*1.15),sc=Math.min(W/(span*1.2),H/(O.vs||5.3)),cx=W/2,cy=H*(O.cy||.66);
   const ang=ay,cA=Math.cos(ang),sA=Math.sin(ang),cT=Math.cos(ax),sT=Math.sin(ax),DD=22;
   const P=(x,y,z)=>{const x1=x*cA+z*sA,z1=-x*sA+z*cA,y2=y*cT-z1*sT,z2=y*sT+z1*cT,k=DD/(DD-z2);return [cx+x1*sc*k,cy-y2*sc*k,z2];};
@@ -6488,7 +6493,7 @@ function Boxes3D(host,opts){
   for(let j=-2;j<=2;j++){const a=P(-fx,0,j*fz/2),b=P(fx,0,j*fz/2);g.strokeStyle="rgba("+base+","+(j===0?.3:.13)+")";g.beginPath();g.moveTo(a[0],a[1]);g.lineTo(b[0],b[1]);g.stroke();}
   // boxes sorted back to front
   const bw=O.bw||.42,bd=O.bd||.62,maxH=O.maxH||3.0,L=[-.4,.8,.45],ll=Math.hypot(...L);const Ln=L.map(v=>v/ll);
-  const items=data.map((d,i)=>{const x=d.x!=null?d.x:(i-(n-1)/2)*(span/n),zc=d.z||0;const k=ease((t-t0-i*(O.stag||70))/800);const h=Math.max(O.minH||.05,d.value/mxv*maxH*k);
+  const items=data.map((d,i)=>{const x=d.x!=null?d.x:(i-(n-1)/2)*(span/n),zc=d.z||0;const k=ease((t-t0-i*(O.stag||70))/800);const h=Math.max(O.minH||.05,sv[i]/mxv*maxH*k);
    const c=P(x,h/2,zc);return {d,i,x,zc,h,z:c[2]};}).sort((a,b)=>a.z-b.z);
   items.forEach(it=>{
    const col=it.d.color||lerp(base,[168,85,247],it.i/Math.max(1,n-1));
@@ -6839,22 +6844,31 @@ addEventListener("resize",()=>{if(on)layout(AR);});
 const st=q("#look3d");
 if(st&&typeof isAdmin!=="undefined"){
  const f=document.createElement("div");f.className="field";f.id="ph3dset";
- f.innerHTML='<label>'+esc(t("Spinning picture"))+'</label><div class="fn3d"><button type="button" class="ph-pick">'+esc(t("Choose picture"))+'<small>'+esc(t("Replaces the diamond"))+'</small></button><button type="button" class="ph-del">'+esc(t("Use the diamond"))+'<small>&nbsp;</small></button></div><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden><div class="muted" id="phmsg" style="font-size:12.5px;margin-top:6px"></div>';
+ f.innerHTML='<label>'+esc(t("Spinning picture"))+'</label><div class="fn3d"><button type="button" class="ph-pick">'+esc(t("Choose picture"))+'<small>'+esc(t("Replaces the diamond"))+'</small></button><button type="button" class="ph-del">'+esc(t("Use the diamond"))+'<small>&nbsp;</small></button></div><input type="file" accept="image/*" hidden><div class="muted" id="phmsg" style="font-size:12.5px;margin-top:6px"></div>';
  st.appendChild(f);
  const inp=q("input",f),msg=q("#phmsg",f);
  const say=s=>{msg.textContent=s;};
  const upd=()=>{f.hidden=!isAdmin;};upd();setInterval(upd,3000);
  q(".ph-pick",f).addEventListener("click",()=>inp.click());
  q(".ph-del",f).addEventListener("click",async()=>{try{await fetch("/api/spinner",{method:"DELETE",headers:{"X-Requested-With":"dashboard"}});say(t("Back to the diamond."));hide();}catch(e){say("Error");}});
+ async function decode(file){
+  try{return await createImageBitmap(file);}catch(e){}
+  return await new Promise((res,rej)=>{const u=URL.createObjectURL(file),im=new Image();im.onload=()=>{URL.revokeObjectURL(u);res(im);};im.onerror=()=>{URL.revokeObjectURL(u);rej(new Error("decode"));};im.src=u;});
+ }
  inp.addEventListener("change",async()=>{const file=inp.files[0];inp.value="";if(!file)return;say("…");
+  let blob=null,why="";
   try{
-   const bm=await createImageBitmap(file),sc=Math.min(1,1100/Math.max(bm.width,bm.height)),cv=document.createElement("canvas");cv.width=Math.round(bm.width*sc);cv.height=Math.round(bm.height*sc);cv.getContext("2d").drawImage(bm,0,0,cv.width,cv.height);
-   const blob=await new Promise(r=>cv.toBlob(r,"image/jpeg",.9));
-   const fd=new FormData();fd.append("file",blob,"photo.jpg");
+   const bm=await decode(file),w=bm.width||bm.naturalWidth,h=bm.height||bm.naturalHeight,sc=Math.min(1,1100/Math.max(w,h)),cv=document.createElement("canvas");cv.width=Math.max(1,Math.round(w*sc));cv.height=Math.max(1,Math.round(h*sc));
+   const c=cv.getContext("2d");c.fillStyle="#000";c.fillRect(0,0,cv.width,cv.height);c.drawImage(bm,0,0,cv.width,cv.height);
+   blob=await new Promise(r=>cv.toBlob(r,"image/jpeg",.9));
+  }catch(e){why="decode";}
+  if(!blob){if(file.size<=4*1024*1024&&/^image\/(png|jpeg|webp|gif)$/.test(file.type))blob=file;else{say(t("This picture could not be read. Try a png or jpg."));return;}}
+  try{
+   const fd=new FormData();fd.append("file",blob,"photo");
    const r=await fetch("/api/spinner",{method:"POST",headers:{"X-Requested-With":"dashboard"},body:fd}),j=await r.json().catch(()=>({}));
-   if(!r.ok){say(j.error||"Error");return;}
+   if(!r.ok){say((j.error||("Error "+r.status))+(r.status===401||r.status===403?" ("+t("only admin")+")":""));return;}
    say(t("Saved. Look at the overview."));load();
-  }catch(e){say("Error");}
+  }catch(e){say(t("Could not reach the server."));}
  });
 }
 load();
