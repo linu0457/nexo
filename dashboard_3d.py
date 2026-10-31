@@ -3621,6 +3621,8 @@ html[data-font=tech] .ck-big,html[data-font=retro] .ck-big{letter-spacing:-.03em
 .fn3d button.tg3d.on i::after{transform:translateX(14px);background:var(--accent)}
 
 .panel[data-help="fees"]{display:none!important}
+
+#fxfloor i{animation:none!important}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
@@ -6385,7 +6387,7 @@ function Boxes3D(host,opts){
   const n=data.length;if(!n){return;}
   const mxv=Math.max(1e-9,...data.map(x=>x.value));
   const O=opts,span=O.span||Math.max(6,n*1.15),sc=Math.min(W/(span*1.2),H/(O.vs||5.3)),cx=W/2,cy=H*(O.cy||.66);
-  const ang=ay+(O.still?0:Math.sin(t/2300)*.3*idle),cA=Math.cos(ang),sA=Math.sin(ang),cT=Math.cos(ax),sT=Math.sin(ax),DD=22;
+  const ang=ay,cA=Math.cos(ang),sA=Math.sin(ang),cT=Math.cos(ax),sT=Math.sin(ax),DD=22;
   const P=(x,y,z)=>{const x1=x*cA+z*sA,z1=-x*sA+z*cA,y2=y*cT-z1*sT,z2=y*sT+z1*cT,k=DD/(DD-z2);return [cx+x1*sc*k,cy-y2*sc*k,z2];};
   const N=(nx,ny,nz)=>{const x1=nx*cA+nz*sA,z1=-nx*sA+nz*cA;return [x1,ny*cT-z1*sT,ny*sT+z1*cT];};
   // glow + floor grid
@@ -6504,7 +6506,7 @@ const dn=(function(){
  o.cv.style.cursor="grab";
  function frame(t){
   const {W,H}=o;g.clearRect(0,0,W,H);st.idle+=((st.drag()?0:1)-st.idle)*.03;
-  spin+=RM?0:Math.min(50,t-lt)/5200*st.idle;lt=t;const ang=st.ay+spin,cA=Math.cos(ang),sA=Math.sin(ang),cT=Math.cos(st.ax),sT=Math.sin(st.ax);
+  lt=t;const ang=st.ay+spin,cA=Math.cos(ang),sA=Math.sin(ang),cT=Math.cos(st.ax),sT=Math.sin(st.ax);
   const R=Math.min(W*.26,H*.42),Ri=R*.58,hh=R*.34,cx=W/2,cy=H*.52,DD=R*7,tot=pos+neg,pf=tot?pos/tot:1;
   const P=(x,y,z)=>{const x1=x*cA+z*sA,z1=-x*sA+z*cA,y2=y*cT-z1*sT,z2=y*sT+z1*cT,k=DD/(DD-z2);return [cx+x1*k,cy-y2*k,z2];};
   const N=(nx,ny,nz)=>{const x1=nx*cA+nz*sA,z1=-nx*sA+nz*cA;return [x1,ny*cT-z1*sT,ny*sT+z1*cT];};
@@ -6534,13 +6536,13 @@ const globe={set(){},burst(){}};
 const ordSec=q("#p-orders"),ringW=document.createElement("div");ringW.className="ring3";ringW.innerHTML='<div class="ring3-s"></div><div class="b3hint">'+esc(t("Drag to turn"))+'</div>';
 ordSec.prepend(ringW);
 const ring=(function(){
- const stage=q(".ring3-s",ringW);let ry=0,vy=.25,dn=false,lx=0,cards=[],n=0,sig="";
+ const stage=q(".ring3-s",ringW);let ry=0,vy=0,dn=false,lx=0,cards=[],n=0,sig="";
  ringW.addEventListener("pointerdown",e=>{dn=true;lx=e.clientX;ringW.setPointerCapture(e.pointerId);});
  ringW.addEventListener("pointermove",e=>{if(!dn)return;const dx=e.clientX-lx;lx=e.clientX;ry+=dx*.4;vy=dx*.4;});
  const up=()=>{dn=false;};ringW.addEventListener("pointerup",up);ringW.addEventListener("pointercancel",up);
  ringW.addEventListener("click",e=>{if(Math.abs(vy)>2)return;const c=e.target.closest(".rc");if(c&&window.openOrder)openOrder(c.dataset.oid);});
  function layout(){const w=ringW.clientWidth<520?150:200;ringW.style.setProperty("--cw",w+"px");const r=n>2?(w/2+14)/Math.tan(Math.PI/n):60;ringW.style.setProperty("--r",Math.round(r)+"px");}
- function step(){const vis=ringW.getBoundingClientRect().height>0&&!document.hidden;if(vis&&n){if(!dn){ry+=vy;vy+=((RM?0:.25)-vy)*.04;}
+ function step(){const vis=ringW.getBoundingClientRect().height>0&&!document.hidden;if(vis&&n){if(!dn){ry+=vy;vy+=(0-vy)*.08;}
    stage.style.transform="rotateX(-8deg) rotateY("+ry+"deg)";
    cards.forEach((c,i)=>{const a=((i*360/n+ry)%360+360)%360,cs=Math.cos(a*Math.PI/180);c.style.opacity=(.28+.72*(cs+1)/2).toFixed(2);c.style.filter=cs<0?"brightness("+(.55+.2*(cs+1))+")":"";});}
   requestAnimationFrame(step);}
