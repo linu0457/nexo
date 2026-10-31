@@ -2643,6 +2643,48 @@ def font_file(name):
                     headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
+SPINNER_FILE = Path(__file__).resolve().parent / "spinner_photo.img"
+_demo_spinner = {}
+
+
+@app.route("/api/spinner", methods=["GET", "POST", "DELETE"])
+def api_spinner():
+    """The spinning picture on the overview (instead of the diamond). Kept only on this server, never in git."""
+    bad = api_guard(admin=request.method != "GET")
+    if bad:
+        return bad
+    if request.method == "GET":
+        data = _demo_spinner.get("d") if DEMO else (SPINNER_FILE.read_bytes() if SPINNER_FILE.is_file() else None)
+        kind = _wr_kind(data) if data else None
+        if not data or kind not in ("png", "jpg", "webp", "gif"):
+            return Response(status=204)
+        return Response(data, mimetype={"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp", "gif": "image/gif"}[kind],
+                        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"})
+    if request.method == "DELETE":
+        _demo_spinner.clear()
+        if not DEMO:
+            try:
+                SPINNER_FILE.unlink()
+            except OSError:
+                pass
+        return jsonify(ok=True)
+    f = request.files.get("file")
+    data = f.read(4 * 1024 * 1024 + 1) if f else b""
+    if not data:
+        return jsonify(error="No file."), 400
+    if len(data) > 4 * 1024 * 1024:
+        return jsonify(error="The picture is too big (max 4 MB)."), 413
+    if _wr_kind(data) not in ("png", "jpg", "webp", "gif"):
+        return jsonify(error="Only pictures (png, jpg, gif, webp)."), 400
+    if DEMO:
+        _demo_spinner["d"] = data
+    else:
+        tmp = SPINNER_FILE.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(SPINNER_FILE)
+    return jsonify(ok=True)
+
+
 @app.route("/logo-mark.png")
 def logo_mark():
     return _png("mark")
@@ -3625,6 +3667,24 @@ html[data-font=tech] .ck-big,html[data-font=retro] .ck-big{letter-spacing:-.03em
 #fxfloor i{animation:none!important}
 
 .tile[data-mod="avg"],.tile[data-mod="revrate"],.tile[data-mod="forecast"],.tile[data-help="s-avg"],.tile[data-help="s-forecast"]{display:none!important}
+
+/* ---------- spinning picture (instead of the diamond) ---------- */
+.ph3d{position:absolute;inset:0;display:grid;place-items:center;perspective:1100px;touch-action:pan-y;cursor:grab}
+.ph3d[hidden]{display:none}
+.ph3d-s{position:relative;width:var(--w);height:var(--h);transform-style:preserve-3d;will-change:transform}
+.pf{position:absolute;backface-visibility:hidden;background-color:#0b1220}
+.pf-f,.pf-b{inset:0;background-size:cover;background-position:center;border-radius:6px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.22)}
+.pf-f{transform:translateZ(calc(var(--d)/2))}
+.pf-b{transform:rotateY(180deg) translateZ(calc(var(--d)/2))}
+.pf-l,.pf-r{width:var(--d);height:100%;top:0;left:calc(50% - var(--d)/2);background:linear-gradient(180deg,color-mix(in srgb,var(--pc) 70%,#fff),color-mix(in srgb,var(--pc) 40%,#000))}
+.pf-l{transform:rotateY(-90deg) translateZ(calc(var(--w)/2))}
+.pf-r{transform:rotateY(90deg) translateZ(calc(var(--w)/2))}
+.pf-t,.pf-d{width:100%;height:var(--d);left:0;top:calc(50% - var(--d)/2);background:color-mix(in srgb,var(--pc) 60%,#fff)}
+.pf-t{transform:rotateX(90deg) translateZ(calc(var(--h)/2))}
+.pf-d{transform:rotateX(-90deg) translateZ(calc(var(--h)/2))}
+.ph3d-s{filter:drop-shadow(0 0 26px color-mix(in srgb,var(--pc) 45%,transparent))}
+.ph3d-sh{position:absolute;left:50%;bottom:8%;width:min(60%,260px);height:26px;transform:translateX(-50%) scaleX(var(--sh,1));border-radius:50%;background:radial-gradient(closest-side,color-mix(in srgb,var(--pc) 45%,transparent),transparent);filter:blur(6px);pointer-events:none}
+.ck-gem.hasph #gem,.ck-gem.hasph .ck-hint{display:none}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
@@ -4178,6 +4238,12 @@ const DA={
 "Drag the diamond": "Træk i diamanten",
 "3D sales per month": "3D-salg pr. måned",
 "3D stock": "3D-lager",
+"Spinning picture": "Drejende billede",
+"Choose picture": "Vælg billede",
+"Replaces the diamond": "Erstatter diamanten",
+"Use the diamond": "Brug diamanten",
+"Back to the diamond.": "Tilbage til diamanten.",
+"Saved. Look at the overview.": "Gemt. Se oversigten.",
 "Effects": "Effekter",
 "Matrix rain": "Matrix-regn",
 "Menu particles": "Menu-partikler",
@@ -6706,6 +6772,68 @@ const base=window.__render;
 window.__render=function(d){base(d);try{upd(d);}catch(e){console.error(e);}};
 if(window.__last)try{upd(window.__last);}catch(e){}
 const cel=FX.celebrate;FX.celebrate=function(){if(cel)cel.apply(this,arguments);coinRain();};
+})();
+
+// ================= NEXO PHOTO: your own picture spins in 3D instead of the diamond =================
+(function(){
+"use strict";
+const q=(s,r)=>(r||document).querySelector(s),qa=(s,r)=>[...(r||document).querySelectorAll(s)];
+const RM=matchMedia("(prefers-reduced-motion:reduce)").matches;
+const box=q(".ck-gem");if(!box)return;
+const wrap=document.createElement("div");wrap.className="ph3d";wrap.hidden=true;
+wrap.innerHTML='<div class="ph3d-s"><div class="pf pf-f"></div><div class="pf pf-b"></div><div class="pf pf-l"></div><div class="pf pf-r"></div><div class="pf pf-t"></div><div class="pf pf-d"></div><div class="pf-sheen"></div></div><div class="ph3d-sh"></div>';
+box.appendChild(wrap);
+const slab=q(".ph3d-s",wrap);
+let ry=-.4,vy=RM?0:.7,drag=false,lx=0,url=null,on=false,last=performance.now(),W=170,H=300,D=22;
+function dims(){const r=box.getBoundingClientRect();return Math.max(280,Math.min(r.height-40,420));}
+function layout(ar){H=dims();W=Math.round(H*Math.min(1.1,Math.max(.5,ar)));D=Math.round(Math.max(14,H*.06));
+ wrap.style.setProperty("--w",W+"px");wrap.style.setProperty("--h",H+"px");wrap.style.setProperty("--d",D+"px");}
+function show(u,ar){url=u;layout(ar);
+ qa(".pf-f,.pf-b",wrap).forEach(e=>e.style.backgroundImage="url("+u+")");
+ box.classList.add("hasph");wrap.hidden=false;on=true;requestAnimationFrame(()=>layout(ar));const c=q("#gem");if(c)c.style.visibility="hidden";const h=q("#ckhint");if(h)h.style.visibility="hidden";}
+function hide(){on=false;box.classList.remove("hasph");wrap.hidden=true;const c=q("#gem");if(c)c.style.visibility="";const h=q("#ckhint");if(h)h.style.visibility="";}
+async function load(){
+ try{const r=await fetch("/api/spinner?"+Date.now(),{cache:"no-store"});
+  if(r.status!==200){hide();return;}
+  const b=await r.blob(),u=URL.createObjectURL(b),im=new Image();
+  im.onload=()=>{if(url)URL.revokeObjectURL(url);show(u,im.naturalWidth/im.naturalHeight);};im.src=u;
+ }catch(e){hide();}
+}
+wrap.addEventListener("pointerdown",e=>{drag=true;lx=e.clientX;wrap.setPointerCapture(e.pointerId);vy=0;});
+wrap.addEventListener("pointermove",e=>{if(!drag)return;const dx=e.clientX-lx;lx=e.clientX;ry+=dx*.012;vy=dx*.012*60;});
+const up=()=>{drag=false;};wrap.addEventListener("pointerup",up);wrap.addEventListener("pointercancel",up);
+function frame(t){requestAnimationFrame(frame);if(!on)return;const r=wrap.getBoundingClientRect();if(!r.width||document.hidden)return;
+ const dt=Math.min(.05,(t-last)/1000);last=t;
+ if(!drag){ry+=vy*dt;if(!RM)vy+=(.7-vy)*Math.min(1,dt*1.2);}
+ slab.style.transform="rotateX(-6deg) rotateY("+ry+"rad)";
+ const cs=Math.abs(Math.cos(ry));wrap.style.setProperty("--sh",(.45+.55*cs).toFixed(2));
+ slab.style.setProperty("--sx",(Math.sin(ry)*60).toFixed(1)+"%");}
+requestAnimationFrame(t=>{last=t;frame(t);});
+addEventListener("resize",()=>{if(on&&url){const im=new Image();im.onload=()=>layout(im.naturalWidth/im.naturalHeight);im.src=url;}});
+
+// ---------- settings: choose / remove the picture ----------
+const st=q("#look3d");
+if(st&&typeof isAdmin!=="undefined"){
+ const f=document.createElement("div");f.className="field";f.id="ph3dset";
+ f.innerHTML='<label>'+esc(t("Spinning picture"))+'</label><div class="fn3d"><button type="button" class="ph-pick">'+esc(t("Choose picture"))+'<small>'+esc(t("Replaces the diamond"))+'</small></button><button type="button" class="ph-del">'+esc(t("Use the diamond"))+'<small>&nbsp;</small></button></div><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden><div class="muted" id="phmsg" style="font-size:12.5px;margin-top:6px"></div>';
+ st.appendChild(f);
+ const inp=q("input",f),msg=q("#phmsg",f);
+ const say=s=>{msg.textContent=s;};
+ const upd=()=>{f.hidden=!isAdmin;};upd();setInterval(upd,3000);
+ q(".ph-pick",f).addEventListener("click",()=>inp.click());
+ q(".ph-del",f).addEventListener("click",async()=>{try{await fetch("/api/spinner",{method:"DELETE",headers:{"X-Requested-With":"dashboard"}});say(t("Back to the diamond."));hide();}catch(e){say("Error");}});
+ inp.addEventListener("change",async()=>{const file=inp.files[0];inp.value="";if(!file)return;say("…");
+  try{
+   const bm=await createImageBitmap(file),sc=Math.min(1,1100/Math.max(bm.width,bm.height)),cv=document.createElement("canvas");cv.width=Math.round(bm.width*sc);cv.height=Math.round(bm.height*sc);cv.getContext("2d").drawImage(bm,0,0,cv.width,cv.height);
+   const blob=await new Promise(r=>cv.toBlob(r,"image/jpeg",.9));
+   const fd=new FormData();fd.append("file",blob,"photo.jpg");
+   const r=await fetch("/api/spinner",{method:"POST",headers:{"X-Requested-With":"dashboard"},body:fd}),j=await r.json().catch(()=>({}));
+   if(!r.ok){say(j.error||"Error");return;}
+   say(t("Saved. Look at the overview."));load();
+  }catch(e){say("Error");}
+ });
+}
+load();
 })();
 
 </script></body></html>"""
