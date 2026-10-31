@@ -6383,7 +6383,7 @@ function Boxes3D(host,opts){
   const n=data.length;if(!n){return;}
   const mxv=Math.max(1e-9,...data.map(x=>x.value));
   const O=opts,span=O.span||Math.max(6,n*1.15),sc=Math.min(W/(span*1.2),H/(O.vs||5.3)),cx=W/2,cy=H*(O.cy||.66);
-  const ang=ay+Math.sin(t/2300)*.3*idle,cA=Math.cos(ang),sA=Math.sin(ang),cT=Math.cos(ax),sT=Math.sin(ax),DD=22;
+  const ang=ay+(O.still?0:Math.sin(t/2300)*.3*idle),cA=Math.cos(ang),sA=Math.sin(ang),cT=Math.cos(ax),sT=Math.sin(ax),DD=22;
   const P=(x,y,z)=>{const x1=x*cA+z*sA,z1=-x*sA+z*cA,y2=y*cT-z1*sT,z2=y*sT+z1*cT,k=DD/(DD-z2);return [cx+x1*sc*k,cy-y2*sc*k,z2];};
   const N=(nx,ny,nz)=>{const x1=nx*cA+nz*sA,z1=-nx*sA+nz*cA;return [x1,ny*cT-z1*sT,ny*sT+z1*cT];};
   // glow + floor grid
@@ -6443,7 +6443,7 @@ function mkPanel(title,hint){
 const sSec=q("#p-sales"),sP=mkPanel("","");
 sP.querySelector("b").textContent=t("3D sales per month");sP.querySelector("span").textContent=t("Drag to turn");
 const sTiles=q("#stiles");sTiles.insertAdjacentElement("afterend",sP);
-const sB=Boxes3D(q(".b3w",sP),{label:"3D sales",hint:t("Drag to turn")});
+const sB=Boxes3D(q(".b3w",sP),{label:"3D sales",still:true,hint:t("Drag to turn")});
 // ---- stock warehouse ----
 const kSec=q("#p-stock"),kP=mkPanel(t("3D stock"),t("Drag to turn"));
 kSec.prepend(kP);
@@ -6487,10 +6487,6 @@ function dragRot(o,st){let dn=false,lx=0,ly=0;const c=o.cv;
  c.addEventListener("pointermove",e=>{if(!dn)return;st.ay+=(e.clientX-lx)*.01;st.ax=Math.max(-.4,Math.min(1.3,st.ax+(e.clientY-ly)*.005));lx=e.clientX;ly=e.clientY;st.vy=0;});
  const up=()=>{dn=false;};c.addEventListener("pointerup",up);c.addEventListener("pointercancel",up);st.drag=()=>dn;}
 
-// ---------- 1. sales: 35-day heat city ----------
-const salesSec=q("#p-sales"),cityP=panel(t("Heat city"),t("last 35 days"));
-const mon=q(".b3p",salesSec);(mon||q("#stiles")).insertAdjacentElement("afterend",cityP);
-const city=Boxes3D(q(".b3w",cityP),{label:"city",span:8,fz:5.2,vs:6.8,cy:.62,bw:.4,bd:.4,maxH:3.2,stag:18,nolabels:true,novals:true,hint:t("Drag to turn")});
 // ---------- 2. profit bars ----------
 const pm=q("#pmonths");let profP=null,prof=null;
 if(pm){profP=panel(t("3D profit"),t("Drag to turn"));pm.closest(".panel").insertAdjacentElement("beforebegin",profP);prof=Boxes3D(q(".b3w",profP),{label:"profit",hint:t("Drag to turn")});}
@@ -6563,10 +6559,6 @@ function upd(d){
  const cur=shownCur(),s=d.sales;
  const k=JSON.stringify([s.days&&Object.keys(s.days).length,s.today,s.all.orders,d.reviews.positive,d.reviews.negative,d.keys.left,d.orders.slice(0,40).map(o=>o.id),cur,GROSS,LANG,(typeof PF!=="undefined"&&PF)?PF.profit.total.profit:0]);
  if(k===sig)return;sig=k;
- // city: 5 weeks, columns = weekday (Mon..Sun), rows = week
- const keys=dkey(d),vals=keys.map(kk=>{const a=s.days[kk];return a?mv(GROSS?a.g:a.a):0;}),mx=Math.max(1e-9,...vals),B=accent();
- city.setData(keys.map((kk,i)=>{const dt=new Date(kk+"T12:00:00"),wd=(dt.getDay()+6)%7,wk=Math.floor((i+ ((new Date(keys[0]+"T12:00:00").getDay()+6)%7))/7),v=vals[i];
-  return {label:"",full:dt.toLocaleDateString(LOC(),{weekday:"long",day:"numeric",month:"short"}),value:v,text:fmt(v,2)+" "+cur,x:(wd-3)*1.05,z:(wk-2)*1.05,color:lerp(lerp(B,[168,85,247],.5),[244,114,182],v/mx),hot:i===keys.length-1};}));
  // keys vault
  if(vault){const left=d.keys.left,tot=48,lit=Math.min(left,tot);const low=left<=10;
   vault.setData(Array.from({length:tot},(_,i)=>({label:"",full:t("Keys")+" "+(i+1),value:1,text:i<lit?t("In stock"):t("Empty"),sub:i===tot-1&&left>tot?"+"+(left-tot):"",x:(i%8-3.5)*1.05,z:(Math.floor(i/8)-2.5)*1.05,color:low?[251,191,36]:[52,211,153],dim:i>=lit})));}
@@ -6583,7 +6575,7 @@ const base=window.__render;
 window.__render=function(d){base(d);try{upd(d);updProfit();}catch(e){console.error(e);}};
 if(typeof profitDraw==="function"){const pd=profitDraw;profitDraw=function(){pd.apply(this,arguments);try{updProfit();}catch(e){console.error(e);}};}
 if(window.__last)try{upd(window.__last);}catch(e){}
-const fx0=window.FX,gb=fx0.gemBurst;fx0.gemBurst=function(){if(gb)gb.apply(this,arguments);city.burst();globe.burst();if(prof)prof.burst();};
+const fx0=window.FX,gb=fx0.gemBurst;fx0.gemBurst=function(){if(gb)gb.apply(this,arguments);globe.burst();if(prof)prof.burst();};
 })();
 
 // ================= NEXO STYLE: skins, fonts, live background (aurora, waves, matrix) =================
