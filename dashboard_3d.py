@@ -6599,7 +6599,7 @@ const SKINS={
  ocean:{n:"Ocean",acc:"#22d3ee",c:["#22d3ee","#2563eb","#14b8a6"]},
  matrix:{n:"Matrix",acc:"#22ff66",c:["#22ff66","#00b341","#0a5c24"]}};
 const FONTS={std:{n:"Standard",f:"Sora, Manrope, sans-serif"},tech:{n:"Teknisk",f:"JetBrains Mono, monospace"},retro:{n:"Retro",f:"Space Mono, monospace"},bold:{n:"Fed",f:"Archivo, sans-serif"},poster:{n:"Plakat",f:"Anton, sans-serif"}};
-let P={skin:"nexo",font:"std",rain:true,fly:true};
+let P={skin:"nexo",font:"std",rain:true};
 try{Object.assign(P,JSON.parse(localStorage.getItem("nexo3d")||"{}"));}catch(e){}
 const save=()=>{try{localStorage.setItem("nexo3d",JSON.stringify(P));}catch(e){}};
 function hex2rgb(h){h=(h||"").trim();const n=parseInt(h.slice(1),16);return [n>>16&255,n>>8&255,n&255];}
@@ -6619,7 +6619,7 @@ if(st){
  p.innerHTML='<h2>'+esc(t("Look"))+'</h2>'
   +'<div class="field"><label>'+esc(t("Theme"))+'</label><div class="sk3d" id="sk3d">'+Object.keys(SKINS).map(k=>'<button type="button" data-k="'+k+'" style="--a:'+SKINS[k].c[0]+';--b:'+SKINS[k].c[1]+';--c:'+SKINS[k].c[2]+'"><i></i><span>'+SKINS[k].n+'</span></button>').join("")+'</div></div>'
   +'<div class="field"><label>'+esc(t("Font"))+'</label><div class="fn3d" id="fn3d">'+Object.keys(FONTS).map(k=>'<button type="button" data-k="'+k+'" style="font-family:'+FONTS[k].f+'">'+FONTS[k].n+'<small>Aa 123</small></button>').join("")+'</div></div>'
-  +'<div class="field"><label>'+esc(t("Effects"))+'</label><div class="fn3d" id="tg3d"><button type="button" class="tg3d" data-k="rain"><i></i>'+esc(t("Matrix rain"))+'</button><button type="button" class="tg3d" data-k="fly"><i></i>'+esc(t("Menu particles"))+'</button></div></div>';
+  +'<div class="field"><label>'+esc(t("Effects"))+'</label><div class="fn3d" id="tg3d"><button type="button" class="tg3d" data-k="rain"><i></i>'+esc(t("Matrix rain"))+'</button></div></div>';
  st.insertBefore(p,st.firstChild);
  p.addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;
   if(b.parentNode.id==="sk3d"){P.skin=b.dataset.k;applySkin();if(window.FX&&FX.gemBurst)FX.gemBurst();}
@@ -6696,26 +6696,6 @@ function starShower(){
   if(alive&&performance.now()-t0<9000)requestAnimationFrame(st);else o.c.remove();
  })(t0);
 }
-// ---------- menu particles ----------
-document.addEventListener("click",e=>{
- const a=e.target.closest("#nav a");if(!a||!on()||RM)return;
- try{if(JSON.parse(localStorage.getItem("nexo3d")||"{}").fly===false)return;}catch(x){}
- const r=a.getBoundingClientRect(),o=overlay("fxfly"),g=o.g,B=accent(),cols=["rgb("+B+")","#ffffff",getComputedStyle(document.documentElement).getPropertyValue("--s2").trim()||"#a78bfa"];
- const horiz=innerWidth>820,tx=horiz?rnd(innerWidth*.12,innerWidth*.5):innerWidth/2,ty=horiz?rnd(90,300):rnd(80,260);
- const L=Array.from({length:44},(_,i)=>({x0:r.left+rnd(0,r.width),y0:r.top+r.height/2+rnd(-6,6),tx:tx+rnd(-80,80),ty:ty+rnd(-60,60),cx:rnd(-.2,.4)*innerWidth+r.left*.6,cy:rnd(-.4,.3)*innerHeight+r.top,d:rnd(0,260),dur:rnd(650,1100),s:rnd(1.6,4),c:cols[i%3],px:0,py:0}));
- const t0=performance.now();
- (function st(){
-  const n=performance.now()-t0;g.clearRect(0,0,o.w,o.h);let alive=0;
-  L.forEach(p=>{const u=(n-p.d)/p.dur;if(u>=1)return;alive++;if(u<0)return;
-   const pos=uu=>{const k=1-Math.pow(1-uu,3),i=1-k;return [i*i*p.x0+2*i*k*p.cx+k*k*p.tx,i*i*p.y0+2*i*k*p.cy+k*k*p.ty];};
-   const c=pos(u),b2=pos(Math.max(0,u-.05));
-   g.globalAlpha=(1-u)*.95;g.strokeStyle=p.c;g.lineWidth=p.s*.8;g.lineCap="round";
-   g.beginPath();g.moveTo(b2[0],b2[1]);g.lineTo(c[0],c[1]);g.stroke();
-   g.fillStyle=p.c;g.shadowColor=p.c;g.shadowBlur=10;g.beginPath();g.arc(c[0],c[1],p.s*(1-u*.4),0,TAU);g.fill();g.shadowBlur=0;});
-  g.globalAlpha=1;if(alive&&n<2200)requestAnimationFrame(st);else o.c.remove();
- })();
-},true);
-
 // ---------- data hook: new record -> celebrate, new good review -> stars ----------
 let seen=null,prevRec=null;
 function upd(d){
