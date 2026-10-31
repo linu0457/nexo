@@ -3623,6 +3623,8 @@ html[data-font=tech] .ck-big,html[data-font=retro] .ck-big{letter-spacing:-.03em
 .panel[data-help="fees"]{display:none!important}
 
 #fxfloor i{animation:none!important}
+
+.tile[data-mod="avg"],.tile[data-mod="revrate"],.tile[data-mod="forecast"],.tile[data-help="s-avg"],.tile[data-help="s-forecast"]{display:none!important}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
