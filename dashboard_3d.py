@@ -3714,6 +3714,7 @@ html[data-font=tech] .ck-big,html[data-font=retro] .ck-big{letter-spacing:-.03em
 body.hide .b3c,body.hide .rc b,body.hide .rc em,body.hide .rc s,body.hide .pmsg,body.hide .stat3 b{filter:blur(18px);user-select:none}
 body.hide .b3tip{display:none!important}
 body.hide .taxpot small,body.hide #stocksum{filter:blur(12px);user-select:none}
+body.hide .mny,body.hide #pendsum,body.hide #calsum,body.hide .toast2 span{filter:blur(12px);user-select:none}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
@@ -4607,7 +4608,7 @@ function welcome(d){
  const hi=h<5?t("Good night"):h<11?t("Good morning"):h<18?t("Hello"):t("Good evening");
  const todayStr=new Date().toDateString();
  const revs=d.reviews.items.filter(r=>new Date(r.time).toDateString()===todayStr),bad=revs.filter(r=>r.rating==="Negative").length;
- const parts=[`${plural(td.orders,"order")} ${t("today")}${td.orders?" ("+money(amtOf(td),s.currency)+")":""}`];
+ const parts=[`${plural(td.orders,"order")} ${t("today")}${td.orders?" <span class=\"mny\">("+money(amtOf(td),s.currency)+")</span>":""}`];
  if(revs.length)parts.push(`${plural(revs.length,"review")} ${t("today")}${bad?" · "+bad+" "+t("bad"):""}`);
  if(d.pending.n)parts.push(`${d.pending.n} ${t("waiting to be completed")}`);
  if(d.keys.left<=10)parts.push(`<span style="color:var(--amber)">${d.keys.left===0?t("Out of keys"):plural(d.keys.left,"key")+" "+t("left")}</span>`);
