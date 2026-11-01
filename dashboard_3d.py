@@ -3113,7 +3113,7 @@ a.lnk,button.lnk{background:none;border:0;padding:0;color:var(--accent);cursor:p
 .sk{display:block;border-radius:8px;background:linear-gradient(100deg,var(--panel2) 30%,var(--line) 50%,var(--panel2) 70%);background-size:300% 100%;animation:sk 1.3s linear infinite}
 .sk.tile{height:96px;border:1px solid var(--line)}.sk.line{height:14px;margin:14px 0}.sk.box{height:210px}
 @keyframes sk{from{background-position:100% 0}to{background-position:0 0}}
-body.hide .n,body.hide .tile .v,body.hide .tile .s,body.hide .big,body.hide td.mono,body.hide svg.ch,body.hide .row2 .e,body.hide .cal .cd b,body.hide .cal .cd s,body.hide .rows .v{filter:blur(7px);user-select:none}
+body.hide .n,body.hide .tile .v,body.hide .tile .s,body.hide .big,body.hide td.mono,body.hide svg.ch,body.hide .row2 .e,body.hide .cal .cd b,body.hide .cal .cd s,body.hide .rows .v{filter:blur(20px);user-select:none}
 body.hide .tip{display:none}
 .cal{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
 .cal .dh{color:var(--muted);font-size:12px;text-align:center;padding:2px 0 4px}
@@ -3176,7 +3176,7 @@ body.hide .tip{display:none}
 .hrow .amt.add{color:var(--accent)}.hrow .amt.rem{color:var(--red)}.hrow .amt small{display:block;color:var(--muted);font-weight:400;font-size:12px}
 .hrow .ic{width:30px;height:30px;border-radius:99px;display:grid;place-items:center;font-weight:700;flex:none;background:var(--accentbg);color:var(--accent)}.hrow .ic.rem{background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)}
 .hrow .l{display:flex;gap:12px;align-items:center;min-width:0}.hrow .t{min-width:0;overflow-wrap:anywhere}
-body.hide .hrow .amt{filter:blur(7px);user-select:none}
+body.hide .hrow .amt{filter:blur(20px);user-select:none}
 .taxpot{display:flex;align-items:baseline;justify-content:center;gap:8px;flex-wrap:wrap;text-align:center;margin:-6px 0 16px;color:var(--ink2);font-size:14px}
 .taxpot b{font-size:20px;color:var(--accent);font-variant-numeric:tabular-nums}.taxpot small{flex-basis:100%;color:var(--muted);font-size:12px}
 .tile .v.bad{color:var(--red)}.tile .v.warn{color:var(--amber)}
@@ -3195,7 +3195,7 @@ body[data-bg=diagonal]{background-image:repeating-linear-gradient(45deg,transpar
 .pv{display:inline-flex;align-items:center;gap:6px;font-weight:600}
 .tsel .tgl{padding:8px 0}
 .chips.wrap{flex-wrap:wrap}
-body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(7px);user-select:none}
+body.hide .taxpot b,body.hide .calcres,body.hide .statrow .pill{filter:blur(20px);user-select:none}
 @media(max-width:820px){.calc{top:12px;right:16px;left:16px;width:auto}}
 
 /* round 3 */
@@ -3526,7 +3526,7 @@ body.ovedit #ovg [data-mod].drag{animation:none}
 .ck-ord b{font-family:Sora}.ck-ord em{font-style:normal;color:var(--muted)}
 .ck-ord.new{animation:newo 1.6s var(--spring) both;box-shadow:0 0 0 1px var(--c1),0 0 30px -4px var(--c1)}
 @keyframes newo{from{transform:scale(.4);opacity:0}}
-body.hide .ck-big,body.hide .ck-sub,body.hide .ck-bars,body.hide .ck-ord b,body.hide .ck-chip b{filter:blur(12px);user-select:none}
+body.hide .ck-big,body.hide .ck-sub,body.hide .ck-bars,body.hide .ck-ord b,body.hide .ck-chip b{filter:blur(26px);user-select:none}
 /* ---------- command palette ---------- */
 #cmdk{position:fixed;inset:0;z-index:450;display:none;align-items:flex-start;justify-content:center;padding:14vh 16px 16px;background:rgba(2,3,8,.6);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
 #cmdk.on{display:flex;animation:fade .2s both}
@@ -3710,6 +3710,10 @@ html[data-font=tech] .ck-big,html[data-font=retro] .ck-big{letter-spacing:-.03em
 
 .ck-gem.hasph{min-height:410px}
 @media(max-width:820px){.ck-gem.hasph{min-height:340px}}
+/* hide numbers: everything that shows a value in 3D is blurred hard too */
+body.hide .b3c,body.hide .rc b,body.hide .rc em,body.hide .rc s,body.hide .pmsg,body.hide .stat3 b{filter:blur(18px);user-select:none}
+body.hide .b3tip{display:none!important}
+body.hide .taxpot small,body.hide #stocksum{filter:blur(12px);user-select:none}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
