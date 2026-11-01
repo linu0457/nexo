@@ -2453,7 +2453,7 @@ BACKUP_KEEP = 14
 BACKUP_NAMES = ("ledger.json", "orders_db.json", "users.json", "devices.json", "prefs.json", "costs.json", "unitcosts.json",
                 "push_subs.json", "warroom.json", "mindmap.json", "refill_log.json", "history.json", "history_backfill.done",
                 "ignore_orders.txt", "additional_info.txt")
-BACKUP_GLOBS = ("keys*.txt", "*_state.json")
+BACKUP_GLOBS = ("keys*.txt", "*_state.json", "spinner_photo.img")
 BACKUP_RE = re.compile(r"^backup-\d{4}-\d{2}-\d{2}_\d{6}(-manual|-safety)?\.zip$")
 _backup_lock = threading.Lock()
 
@@ -2656,19 +2656,21 @@ def api_spinner():
     if bad:
         return bad
     if request.method == "GET":
+        custom = bool(DEMO and _demo_spinner.get("d"))
         if DEMO:
             data = _demo_spinner.get("d") or (None if _demo_spinner.get("off") or not SPINNER_DEFAULT.is_file() else SPINNER_DEFAULT.read_bytes())
         elif SPINNER_OFF.is_file():
             data = None
         elif SPINNER_FILE.is_file():
             data = SPINNER_FILE.read_bytes()
+            custom = True
         else:
             data = SPINNER_DEFAULT.read_bytes() if SPINNER_DEFAULT.is_file() else None
         kind = _wr_kind(data) if data else None
         if not data or kind not in ("png", "jpg", "webp", "gif"):
             return Response(status=204)
         return Response(data, mimetype={"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp", "gif": "image/gif"}[kind],
-                        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"})
+                        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff", "X-Spinner": "custom" if custom else "default"})
     if request.method == "DELETE":
         _demo_spinner.clear()
         if DEMO:
@@ -6820,13 +6822,24 @@ function show(u,ar){url=u;layout(ar);
  qa(".pf-f,.pf-b",wrap).forEach(e=>e.style.backgroundImage="url("+u+")");
  box.classList.add("hasph");wrap.hidden=false;on=true;requestAnimationFrame(()=>layout(ar));const c=q("#gem");if(c)c.style.visibility="hidden";const h=q("#ckhint");if(h)h.style.visibility="hidden";}
 function hide(){on=false;box.classList.remove("hasph");wrap.hidden=true;const c=q("#gem");if(c)c.style.visibility="";const h=q("#ckhint");if(h)h.style.visibility="";}
+const LSK="nexo3d_photo";
+function lsGet(){try{return localStorage.getItem(LSK)||"";}catch(e){return "";}}
+function lsSet(v){try{if(v)localStorage.setItem(LSK,v);else localStorage.removeItem(LSK);}catch(e){}}
+function showBlob(b){const u=URL.createObjectURL(b),im=new Image();im.onload=()=>{if(url)URL.revokeObjectURL(url);show(u,im.naturalWidth/im.naturalHeight);};im.src=u;}
+function fromLocal(){const d=lsGet();if(!d||d==="off")return false;fetch(d).then(r=>r.blob()).then(showBlob).catch(()=>{});return true;}
 async function load(){
  try{const r=await fetch("/api/spinner?"+Date.now(),{cache:"no-store"});
-  if(r.status!==200){hide();return;}
-  const b=await r.blob(),u=URL.createObjectURL(b),im=new Image();
-  im.onload=()=>{if(url)URL.revokeObjectURL(url);show(u,im.naturalWidth/im.naturalHeight);};im.src=u;
- }catch(e){hide();}
+  const loc=lsGet();
+  // the server lost the chosen picture (or fell back to the default): put this device's copy back
+  if(loc&&loc!=="off"&&r.headers.get("X-Spinner")!=="custom"){
+   try{const bl=await (await fetch(loc)).blob(),fd=new FormData();fd.append("file",bl,"photo");
+    const up=await fetch("/api/spinner",{method:"POST",headers:{"X-Requested-With":"dashboard"},body:fd});if(up.ok){showBlob(bl);return;}}catch(e){}
+   showBlobFromLocal();return;}
+  if(r.status!==200){if(loc==="off"||!fromLocal())hide();return;}
+  showBlob(await r.blob());
+ }catch(e){if(!fromLocal())hide();}
 }
+function showBlobFromLocal(){if(!fromLocal())hide();}
 wrap.addEventListener("pointerdown",e=>{drag=true;lx=e.clientX;wrap.setPointerCapture(e.pointerId);vy=0;});
 wrap.addEventListener("pointermove",e=>{if(!drag)return;const dx=e.clientX-lx;lx=e.clientX;ry+=dx*.012;vy=dx*.012*60;});
 const up=()=>{drag=false;};wrap.addEventListener("pointerup",up);wrap.addEventListener("pointercancel",up);
@@ -6850,7 +6863,7 @@ if(st&&typeof isAdmin!=="undefined"){
  const say=s=>{msg.textContent=s;};
  const upd=()=>{f.hidden=!isAdmin;};upd();setInterval(upd,3000);
  q(".ph-pick",f).addEventListener("click",()=>inp.click());
- q(".ph-del",f).addEventListener("click",async()=>{try{await fetch("/api/spinner",{method:"DELETE",headers:{"X-Requested-With":"dashboard"}});say(t("Back to the diamond."));hide();}catch(e){say("Error");}});
+ q(".ph-del",f).addEventListener("click",async()=>{try{await fetch("/api/spinner",{method:"DELETE",headers:{"X-Requested-With":"dashboard"}});lsSet("off");say(t("Back to the diamond."));hide();}catch(e){say("Error");}});
  async function decode(file){
   try{return await createImageBitmap(file);}catch(e){}
   return await new Promise((res,rej)=>{const u=URL.createObjectURL(file),im=new Image();im.onload=()=>{URL.revokeObjectURL(u);res(im);};im.onerror=()=>{URL.revokeObjectURL(u);rej(new Error("decode"));};im.src=u;});
@@ -6867,7 +6880,7 @@ if(st&&typeof isAdmin!=="undefined"){
    const fd=new FormData();fd.append("file",blob,"photo");
    const r=await fetch("/api/spinner",{method:"POST",headers:{"X-Requested-With":"dashboard"},body:fd}),j=await r.json().catch(()=>({}));
    if(!r.ok){say((j.error||("Error "+r.status))+(r.status===401||r.status===403?" ("+t("only admin")+")":""));return;}
-   say(t("Saved. Look at the overview."));load();
+   {const fr=new FileReader();fr.onload=()=>lsSet(String(fr.result));fr.readAsDataURL(blob);}say(t("Saved. Look at the overview."));load();
   }catch(e){say(t("Could not reach the server."));}
  });
 }
