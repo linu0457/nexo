@@ -3714,7 +3714,7 @@ html[data-font=tech] .ck-big,html[data-font=retro] .ck-big{letter-spacing:-.03em
 body.hide .b3c,body.hide .rc b,body.hide .rc em,body.hide .rc s,body.hide .pmsg,body.hide .stat3 b{filter:blur(18px);user-select:none}
 body.hide .b3tip{display:none!important}
 body.hide .taxpot small,body.hide #stocksum{filter:blur(12px);user-select:none}
-body.hide .mny,body.hide #pendsum,body.hide #calsum,body.hide .toast2 span{filter:blur(12px);user-select:none}
+body.hide .welcome .w2,body.hide .mny,body.hide #pendsum,body.hide #calsum,body.hide .toast2 span{filter:blur(12px);user-select:none}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
