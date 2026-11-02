@@ -6522,7 +6522,7 @@ function Boxes3D(host,opts){
   if(!O.nolabels)items.slice().sort((a,b)=>a.i-b.i).forEach(it=>{const lp=P(it.x,0,1.15);g.fillStyle=hover===it.i?"#fff":"rgba(180,196,226,.85)";g.fillText(it.d.label,lp[0],lp[1]+4);});
   // value labels for top bars / hovered
   const best=data.reduce((b,x,i)=>x.value>data[b].value?i:b,0);
-  (O.novals?[]:items).forEach(it=>{if(it.i!==best&&it.i!==hover&&it.i!==n-1)return;const tp=P(it.x,it.h,it.zc);g.font="800 12px Sora, sans-serif";g.fillStyle="#fff";const tx=it.d.top||it.d.text||String(it.d.value),tw=g.measureText(tx).width/2+4;g.fillText(tx,Math.max(tw,Math.min(W-tw,tp[0])),Math.max(16,tp[1]-10));});
+  (O.novals?[]:items).forEach(it=>{if(it.i!==best&&it.i!==hover&&!(it.d.hot!=null?it.d.hot:it.i===n-1))return;const tp=P(it.x,it.h,it.zc);g.font="800 12px Sora, sans-serif";g.fillStyle="#fff";const tx=it.d.top||it.d.text||String(it.d.value),tw=g.measureText(tx).width/2+4;g.fillText(tx,Math.max(tw,Math.min(W-tw,tp[0])),Math.max(16,tp[1]-10));});
   // tooltip
   if(hover>=0&&data[hover]){const d=data[hover],it=items.find(x=>x.i===hover);if(it){const tp=P(it.x,it.h,it.zc);tip.style.opacity=1;tip.style.transform="translate("+Math.round(tp[0])+"px,"+Math.round(tp[1]-26)+"px) translate(-50%,-100%)";tip.innerHTML="<b>"+(d.full||d.label).replace(/</g,"&lt;")+"</b><span>"+(d.text||d.value)+"</span>"+(d.sub?"<small>"+d.sub.replace(/</g,"&lt;")+"</small>":"");}}else tip.style.opacity=0;
  }
@@ -6560,8 +6560,9 @@ let sig="";
 function upd(d){
  const cur=shownCur(),key=JSON.stringify([d.sales.months.slice(-12).map(m=>[m.key,m.amount,m.gross]),d.stock.offers.map(o=>[o.title,o.quantity,o.price]),cur,GROSS,LANG]);
  if(key===sig)return;sig=key;
- let mm=d.sales.months.slice(-12);const f0=mm.findIndex(m=>(m.gross||0)||(m.amount||0)||(m.orders||0));if(f0>0)mm=mm.slice(f0);
- const ms=mm.map((m,i,a)=>({label:monthLabel(m.key,true),full:monthLabel(m.key),value:mv(GROSS?m.gross:m.amount),text:fmt(mv(GROSS?m.gross:m.amount),0)+" "+cur,sub:m.orders!=null?plural(m.orders,"order"):"",hot:i===a.length-1,top:fmt(mv(GROSS?m.gross:m.amount),0)}));
+ let mm=d.sales.months.slice();const f0=mm.findIndex(m=>(m.gross||0)||(m.amount||0)||(m.orders||0));if(f0>0)mm=mm.slice(f0);if(mm.length>12)mm=mm.slice(-12);
+ const nowN=mm.length;while(mm.length<12){const k=mm[mm.length-1].key,y=+k.slice(0,4),mo=+k.slice(5,7);mm.push({key:(mo===12?y+1:y)+"-"+String(mo===12?1:mo+1).padStart(2,"0"),gross:0,amount:0,orders:0,future:true});}
+ const ms=mm.map((m,i,a)=>({label:monthLabel(m.key,true),full:monthLabel(m.key),value:mv(GROSS?m.gross:m.amount),text:fmt(mv(GROSS?m.gross:m.amount),0)+" "+cur,sub:m.orders!=null?plural(m.orders,"order"):"",hot:i===nowN-1,dim:!!m.future,top:m.future?"":fmt(mv(GROSS?m.gross:m.amount),0)}));
  sB.setData(ms);
  const offs=d.stock.offers.slice(0,12).map(o=>({label:(o.title||"?").split(/\s+/).slice(0,2).join(" ").slice(0,12),full:o.title,value:o.quantity||0,top:fmt(o.quantity||0,0),text:fmt(o.quantity||0,0)+" "+t("in stock"),sub:money(o.price.amount,o.price.currency),color:o.quantity<=5?[251,191,36]:undefined}));
  kB.setData(offs);kP.hidden=!offs.length;
@@ -6676,8 +6677,8 @@ function upd(d){
 }
 function updProfit(){
  if(!prof||typeof PF==="undefined"||!PF)return;const p=PF.profit,c=shownCur();
- let ms=p.months.slice().sort((a,b)=>a.key<b.key?-1:1).slice(-12);const f0=ms.findIndex(m=>m.profit);if(f0>0)ms=ms.slice(f0);
- prof.setData(ms.map((m,i)=>({label:monthLabel(m.key,true),full:monthLabel(m.key),value:Math.abs(mv(m.profit)),text:fmt(mv(m.profit),0)+" "+c,top:fmt(mv(m.profit),0),color:m.profit<0?[248,113,113]:undefined,hot:i===ms.length-1})));
+ let ms=p.months.slice().sort((a,b)=>a.key<b.key?-1:1).slice(-12);const f0=ms.findIndex(m=>m.profit);if(f0>0)ms=ms.slice(f0);const nowN=ms.length;while(ms.length<12){const k=ms[ms.length-1].key,y=+k.slice(0,4),mo=+k.slice(5,7);ms.push({key:(mo===12?y+1:y)+"-"+String(mo===12?1:mo+1).padStart(2,"0"),profit:0,future:true});}
+ prof.setData(ms.map((m,i)=>({label:monthLabel(m.key,true),full:monthLabel(m.key),value:Math.abs(mv(m.profit)),text:fmt(mv(m.profit),0)+" "+c,top:fmt(mv(m.profit),0),color:m.profit<0?[248,113,113]:undefined,hot:i===nowN-1,dim:!!m.future})));
 }
 const base=window.__render;
 window.__render=function(d){base(d);try{upd(d);updProfit();}catch(e){console.error(e);}};
