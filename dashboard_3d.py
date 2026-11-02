@@ -6560,7 +6560,8 @@ let sig="";
 function upd(d){
  const cur=shownCur(),key=JSON.stringify([d.sales.months.slice(-12).map(m=>[m.key,m.amount,m.gross]),d.stock.offers.map(o=>[o.title,o.quantity,o.price]),cur,GROSS,LANG]);
  if(key===sig)return;sig=key;
- const ms=d.sales.months.slice(-12).map((m,i,a)=>({label:monthLabel(m.key,true),full:monthLabel(m.key),value:mv(GROSS?m.gross:m.amount),text:fmt(mv(GROSS?m.gross:m.amount),0)+" "+cur,sub:m.orders!=null?plural(m.orders,"order"):"",hot:i===a.length-1,top:fmt(mv(GROSS?m.gross:m.amount),0)})).reverse();
+ let mm=d.sales.months.slice(-12);const f0=mm.findIndex(m=>(m.gross||0)||(m.amount||0)||(m.orders||0));if(f0>0)mm=mm.slice(f0);
+ const ms=mm.map((m,i,a)=>({label:monthLabel(m.key,true),full:monthLabel(m.key),value:mv(GROSS?m.gross:m.amount),text:fmt(mv(GROSS?m.gross:m.amount),0)+" "+cur,sub:m.orders!=null?plural(m.orders,"order"):"",hot:i===a.length-1,top:fmt(mv(GROSS?m.gross:m.amount),0)}));
  sB.setData(ms);
  const offs=d.stock.offers.slice(0,12).map(o=>({label:(o.title||"?").split(/\s+/).slice(0,2).join(" ").slice(0,12),full:o.title,value:o.quantity||0,top:fmt(o.quantity||0,0),text:fmt(o.quantity||0,0)+" "+t("in stock"),sub:money(o.price.amount,o.price.currency),color:o.quantity<=5?[251,191,36]:undefined}));
  kB.setData(offs);kP.hidden=!offs.length;
@@ -6675,8 +6676,8 @@ function upd(d){
 }
 function updProfit(){
  if(!prof||typeof PF==="undefined"||!PF)return;const p=PF.profit,c=shownCur();
- const ms=p.months.slice().sort((a,b)=>a.key<b.key?-1:1).slice(-12);
- prof.setData(ms.map((m,i)=>({label:monthLabel(m.key,true),full:monthLabel(m.key),value:Math.abs(mv(m.profit)),text:fmt(mv(m.profit),0)+" "+c,top:fmt(mv(m.profit),0),color:m.profit<0?[248,113,113]:undefined,hot:i===ms.length-1})).reverse());
+ let ms=p.months.slice().sort((a,b)=>a.key<b.key?-1:1).slice(-12);const f0=ms.findIndex(m=>m.profit);if(f0>0)ms=ms.slice(f0);
+ prof.setData(ms.map((m,i)=>({label:monthLabel(m.key,true),full:monthLabel(m.key),value:Math.abs(mv(m.profit)),text:fmt(mv(m.profit),0)+" "+c,top:fmt(mv(m.profit),0),color:m.profit<0?[248,113,113]:undefined,hot:i===ms.length-1})));
 }
 const base=window.__render;
 window.__render=function(d){base(d);try{upd(d);updProfit();}catch(e){console.error(e);}};
