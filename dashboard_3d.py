@@ -6515,7 +6515,7 @@ function Boxes3D(host,opts){
     polys.push({i:it.i,p:pts.map(p=>[p[0],p[1]])});
    });
    // top glow
-   if(it.i===n-1||it.d.hot){const tp=P(it.x,it.h,it.zc);g.save();g.shadowColor="rgb("+col+")";g.shadowBlur=24;g.fillStyle="rgba(255,255,255,.9)";g.beginPath();g.arc(tp[0],tp[1],2.5,0,6.3);g.fill();g.restore();}
+   if(it.d.hot!=null?it.d.hot:it.i===n-1){const tp=P(it.x,it.h,it.zc);g.save();g.shadowColor="rgb("+col+")";g.shadowBlur=24;g.fillStyle="rgba(255,255,255,.9)";g.beginPath();g.arc(tp[0],tp[1],2.5,0,6.3);g.fill();g.restore();}
   });
   // labels
   g.textAlign="center";g.font="600 11px Manrope, system-ui, sans-serif";
@@ -6560,7 +6560,7 @@ let sig="";
 function upd(d){
  const cur=shownCur(),key=JSON.stringify([d.sales.months.slice(-12).map(m=>[m.key,m.amount,m.gross]),d.stock.offers.map(o=>[o.title,o.quantity,o.price]),cur,GROSS,LANG]);
  if(key===sig)return;sig=key;
- const ms=d.sales.months.slice(-12).map((m,i,a)=>({label:monthLabel(m.key,true),full:monthLabel(m.key),value:mv(GROSS?m.gross:m.amount),text:fmt(mv(GROSS?m.gross:m.amount),0)+" "+cur,sub:m.orders!=null?plural(m.orders,"order"):"",hot:i===a.length-1,top:fmt(mv(GROSS?m.gross:m.amount),0)}));
+ const ms=d.sales.months.slice(-12).map((m,i,a)=>({label:monthLabel(m.key,true),full:monthLabel(m.key),value:mv(GROSS?m.gross:m.amount),text:fmt(mv(GROSS?m.gross:m.amount),0)+" "+cur,sub:m.orders!=null?plural(m.orders,"order"):"",hot:i===a.length-1,top:fmt(mv(GROSS?m.gross:m.amount),0)})).reverse();
  sB.setData(ms);
  const offs=d.stock.offers.slice(0,12).map(o=>({label:(o.title||"?").split(/\s+/).slice(0,2).join(" ").slice(0,12),full:o.title,value:o.quantity||0,top:fmt(o.quantity||0,0),text:fmt(o.quantity||0,0)+" "+t("in stock"),sub:money(o.price.amount,o.price.currency),color:o.quantity<=5?[251,191,36]:undefined}));
  kB.setData(offs);kP.hidden=!offs.length;
@@ -6676,7 +6676,7 @@ function upd(d){
 function updProfit(){
  if(!prof||typeof PF==="undefined"||!PF)return;const p=PF.profit,c=shownCur();
  const ms=p.months.slice().sort((a,b)=>a.key<b.key?-1:1).slice(-12);
- prof.setData(ms.map((m,i)=>({label:monthLabel(m.key,true),full:monthLabel(m.key),value:Math.abs(mv(m.profit)),text:fmt(mv(m.profit),0)+" "+c,top:fmt(mv(m.profit),0),color:m.profit<0?[248,113,113]:undefined,hot:i===ms.length-1})));
+ prof.setData(ms.map((m,i)=>({label:monthLabel(m.key,true),full:monthLabel(m.key),value:Math.abs(mv(m.profit)),text:fmt(mv(m.profit),0)+" "+c,top:fmt(mv(m.profit),0),color:m.profit<0?[248,113,113]:undefined,hot:i===ms.length-1})).reverse());
 }
 const base=window.__render;
 window.__render=function(d){base(d);try{upd(d);updProfit();}catch(e){console.error(e);}};
