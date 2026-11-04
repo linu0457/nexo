@@ -1,5 +1,9 @@
 @echo off
 cd /d "%~dp0"
-echo Laegger de seneste keys op igen (standard 25). Skriv: gendan_keys.bat 40  for et andet antal.
-if "%1"=="" (py offer.py gendan --antal 25) else (py offer.py gendan --antal %1)
+rem Brug: gendan_keys.bat [antal] [spring-over]   (standard: 25 keys, spring de 25 allernyeste over)
+set A=%1
+if "%A%"=="" set A=25
+set S=%2
+if "%S%"=="" set S=25
+py offer.py gendan --antal %A% --spring %S%
 pause

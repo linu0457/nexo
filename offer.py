@@ -306,22 +306,26 @@ def auto(client, offer_id, info, target, batch, every, offer_title="?"):
         time.sleep(delay)
 
 
-def gendan(client, offer_id, info, n):
+def gendan(client, offer_id, info, n, skip=0):
     """Adds the latest N keys from keys_used.txt to the offer again (they were marked used but never really
     reached Eldorado). Keys Eldorado refuses stay in keys.txt; on a limit error it waits 5 minutes and goes on."""
     if not USED_FILE.exists():
         raise SystemExit("keys_used.txt not found - nothing to restore.")
     lines = USED_FILE.read_text(encoding="utf-8").splitlines()
     used = [l for l in lines if l.strip()]
-    pick = [l.strip() for l in used[-n:]]
+    end = len(used) - skip
+    pick = [l.strip() for l in used[max(0, end - n):max(0, end)]]
     if not pick:
-        raise SystemExit("keys_used.txt is empty.")
-    print(f"These {len(pick)} keys (the latest in keys_used.txt) will be added to the offer again:")
+        raise SystemExit("No keys to restore (keys_used.txt is too short).")
+    if skip:
+        print(f"Skipping the {skip} very latest used keys ({used[-skip].strip()} ... {used[-1].strip()}).")
+    print(f"These {len(pick)} keys will be added to the offer again:")
     for k in pick:
         print("  ", k)
     if input("\nType JA and press Enter to add them: ").strip().lower() not in ("ja", "j", "yes", "y"):
         raise SystemExit("Cancelled - nothing was changed.")
-    USED_FILE.write_text("\n".join(used[:-len(pick)]) + ("\n" if len(used) > len(pick) else ""), encoding="utf-8")
+    rest = used[:max(0, end - n)] + used[max(0, end):]
+    USED_FILE.write_text("\n".join(rest) + ("\n" if rest else ""), encoding="utf-8")
     todo = list(pick)
     try:
         while todo:
@@ -350,7 +354,8 @@ def main():
     ap.add_argument("--target", type=int, default=100)
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--every", type=int, default=10)
-    ap.add_argument("--antal", type=int, default=25, help="gendan: how many of the latest used keys to add again")
+    ap.add_argument("--antal", type=int, default=25, help="gendan: how many used keys to add again")
+    ap.add_argument("--spring", type=int, default=0, help="gendan: skip this many of the very latest used keys first")
     a = ap.parse_args()
 
     client = EldoradoClient()
@@ -359,7 +364,7 @@ def main():
     info = read_info()
 
     if a.mode == "gendan":
-        gendan(client, offer_id, info, a.antal)
+        gendan(client, offer_id, info, a.antal, a.spring)
         return
 
     if a.mode == "auto":
