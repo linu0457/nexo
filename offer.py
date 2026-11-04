@@ -116,6 +116,7 @@ def read_info():
     return text
 
 
+PAUSE_ON_ERROR = 300   # seconds to wait when Eldorado refuses keys (limit per round)
 FILL = "Scroll Down"   # shown in the username/password/email/MFA fields (the real key is in Additional info)
 
 
@@ -230,6 +231,7 @@ def auto(client, offer_id, info, target, batch, every, offer_title="?"):
           f"I add keys from keys.txt. Checking every {every} seconds. Stop with Ctrl+C.")
     warned = False
     delay = every
+    pause_after_error = False
     while True:
         try:
             stock = quantity(client, offer_id)
@@ -283,9 +285,18 @@ def auto(client, offer_id, info, target, batch, every, offer_title="?"):
                         if error == 403:
                             notify("Auto Refill STOPPED", [("No permission to add accounts (403).", None)], RED)
                             raise SystemExit("STOPPED: no permission to add accounts.")
+                        if error is not None:
+                            # Eldorado only lets a limited number of keys through at a time: wait 5 minutes,
+                            # then the next round adds the keys that were not added (they are still in keys.txt)
+                            print(f"Eldorado refused some keys ({error}). Pausing {PAUSE_ON_ERROR // 60} minutes, "
+                                  f"then I add the remaining keys.", flush=True)
+                            pause_after_error = True
                 else:
                     warned = False
             delay = every
+            if pause_after_error:
+                delay = PAUSE_ON_ERROR
+                pause_after_error = False
         except requests.HTTPError as e:
             print(f"API error {e.response.status_code if e.response is not None else '?'}. Retrying shortly.")
             delay = min(delay * 2, 60)
