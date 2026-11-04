@@ -17,7 +17,7 @@ except Exception:
 
 Every key in keys.txt (one per line) is added as one extra account to your existing
 offer (the one with "netflix" in the title). Login, Password and all other required
-fields are filled with "."  The text of additional_info.txt is used as Additional info,
+fields are filled with "Scroll Down"  The text of additional_info.txt is used as Additional info,
 with {KEY} replaced by the key. The changes are REAL and visible on Eldorado immediately.
 
   py offer.py          -> preview only (nothing is changed)
@@ -116,11 +116,14 @@ def read_info():
     return text
 
 
-def account_body(info, key):
+FILL = "Scroll Down"   # shown in the username/password/email/MFA fields (the real key is in Additional info)
+
+
+def account_body(info, key, fill=FILL):
     return {"structuredDetails": {
-        "accountDetails": {"accountLogin": ".", "accountPassword": "."},
-        "emailDetails": {"emailProviderUrl": ".", "emailLogin": ".", "emailPassword": "."},
-        "mfaDetails": {"mfaLogin": ".", "mfaPassword": "."},
+        "accountDetails": {"accountLogin": fill, "accountPassword": fill},
+        "emailDetails": {"emailProviderUrl": fill, "emailLogin": fill, "emailPassword": fill},
+        "mfaDetails": {"mfaLogin": fill, "mfaPassword": fill},
         "additionalInfo": info.replace(PLACEHOLDER, key),
     }}
 
@@ -142,8 +145,17 @@ def add_keys(client, offer_id, info, keys):
     try:
         for key in keys:
             try:
-                client.request("POST", f"/api/flexibleOffersUser/me/offers/{offer_id}/secretDetails",
-                               json=account_body(info, key))
+                try:
+                    client.request("POST", f"/api/flexibleOffersUser/me/offers/{offer_id}/secretDetails",
+                                   json=account_body(info, key))
+                except requests.HTTPError as e0:
+                    # if Eldorado does not accept the text in some field, fall back to the old "." filler
+                    if e0.response is not None and e0.response.status_code in (400, 422):
+                        print(f"Eldorado did not accept '{FILL}' in the fields ({e0.response.status_code}), retrying with '.'")
+                        client.request("POST", f"/api/flexibleOffersUser/me/offers/{offer_id}/secretDetails",
+                                       json=account_body(info, key, "."))
+                    else:
+                        raise
             except requests.HTTPError as e:
                 error = e.response.status_code if e.response is not None else "?"
                 body = e.response.text[:600] if e.response is not None else ""
