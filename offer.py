@@ -306,19 +306,61 @@ def auto(client, offer_id, info, target, batch, every, offer_title="?"):
         time.sleep(delay)
 
 
+def gendan(client, offer_id, info, n):
+    """Adds the latest N keys from keys_used.txt to the offer again (they were marked used but never really
+    reached Eldorado). Keys Eldorado refuses stay in keys.txt; on a limit error it waits 5 minutes and goes on."""
+    if not USED_FILE.exists():
+        raise SystemExit("keys_used.txt not found - nothing to restore.")
+    lines = USED_FILE.read_text(encoding="utf-8").splitlines()
+    used = [l for l in lines if l.strip()]
+    pick = [l.strip() for l in used[-n:]]
+    if not pick:
+        raise SystemExit("keys_used.txt is empty.")
+    print(f"These {len(pick)} keys (the latest in keys_used.txt) will be added to the offer again:")
+    for k in pick:
+        print("  ", k)
+    if input("\nType JA and press Enter to add them: ").strip().lower() not in ("ja", "j", "yes", "y"):
+        raise SystemExit("Cancelled - nothing was changed.")
+    USED_FILE.write_text("\n".join(used[:-len(pick)]) + ("\n" if len(used) > len(pick) else ""), encoding="utf-8")
+    todo = list(pick)
+    try:
+        while todo:
+            done, error = add_keys(client, offer_id, info, todo)   # moves the added keys back to keys_used.txt
+            todo = [k for k in todo if k not in done]
+            if not todo:
+                break
+            if error == 403:
+                print("STOPPED: no permission to add accounts (403).")
+                break
+            print(f"Eldorado refused some keys ({error}). Pausing {PAUSE_ON_ERROR // 60} minutes, "
+                  f"then I add the remaining {len(todo)}.", flush=True)
+            time.sleep(PAUSE_ON_ERROR)
+    finally:
+        if todo:   # never lose a key: whatever was not added goes to the front of keys.txt
+            have = KEYS_FILE.read_text(encoding="utf-8") if KEYS_FILE.exists() else ""
+            KEYS_FILE.write_text("\n".join(todo) + "\n" + have, encoding="utf-8")
+            print(f"{len(todo)} key(s) were NOT added and are back in keys.txt.")
+    print(f"Done. {len(pick) - len(todo)} of {len(pick)} keys added. Check the stock number on Eldorado.")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", nargs="?", default="preview", choices=["preview", "test", "go", "auto"])
+    ap.add_argument("mode", nargs="?", default="preview", choices=["preview", "test", "go", "auto", "gendan"])
     ap.add_argument("--from", dest="word", default="netflix")
     ap.add_argument("--target", type=int, default=100)
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--every", type=int, default=10)
+    ap.add_argument("--antal", type=int, default=25, help="gendan: how many of the latest used keys to add again")
     a = ap.parse_args()
 
     client = EldoradoClient()
     offer_id = find_offer_id(client, a.word)
     offer = (client.request("GET", f"/api/flexibleOffers/{offer_id}/private") or {}).get("offer") or {}
     info = read_info()
+
+    if a.mode == "gendan":
+        gendan(client, offer_id, info, a.antal)
+        return
 
     if a.mode == "auto":
         print(f"Offer    : {offer.get('offerTitle')}  (state: {offer.get('offerState')})")
