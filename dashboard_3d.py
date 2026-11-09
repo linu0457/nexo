@@ -1127,6 +1127,36 @@ def api_history():
     return jsonify(history_view(kind, limit, offset))
 
 
+def extract_keys(text):
+    """Lines of keys from pasted text. Understands CSV exports (a 'code' column; only rows whose status is 'active'),
+    otherwise every line is one key as before."""
+    import csv
+    out, col, st = [], None, None
+    for raw in str(text).splitlines():
+        l = raw.strip()
+        if not l or l.startswith("#"):
+            continue
+        if "," in l or l.startswith('"'):
+            try:
+                row = next(csv.reader([l]))
+            except (csv.Error, StopIteration):
+                row = [l]
+            low = [c.strip().lower() for c in row]
+            if "code" in low and ("status" in low or "product" in low or len(low) > 1):   # header line
+                col = low.index("code")
+                st = low.index("status") if "status" in low else None
+                continue
+            if col is not None and col < len(row):
+                if st is not None and st < len(row) and row[st].strip().lower() not in ("active", ""):
+                    continue                      # already redeemed / sent: not a usable key
+                l = row[col].strip()
+            elif len(row) > 1:
+                l = row[0].strip()                # CSV without header: first column is the key
+        if l:
+            out.append(l)
+    return out
+
+
 @app.route("/api/keys", methods=["POST"])
 def api_keys_add():
     bad = api_guard(admin=True)
@@ -1134,8 +1164,7 @@ def api_keys_add():
         return bad
     j = request.get_json(silent=True) or {}
     dry = bool(j.get("dry"))          # dry = only count what would happen, change nothing
-    lines = [l.strip() for l in str(j.get("text", "")).splitlines()]
-    lines = [l for l in lines if l and not l.startswith("#")]
+    lines = extract_keys(j.get("text", ""))
     if len(lines) > 5000:
         return jsonify(error="At most 5000 keys at a time."), 400
     with _keys_lock:
@@ -4987,7 +5016,24 @@ $("calnext").onclick=()=>{const [y,m]=calMonth.split("-").map(Number),d=new Date
 $("rvseg").onclick=e=>{const b=e.target.closest("[data-r]");if(!b)return;RV=b.dataset.r;qsa("#rvseg button").forEach(x=>x.classList.toggle("on",x===b));delete seen.reviews;render(window.__last);};
 
 // ================= keys: upload with preview, find a key =================
-const keyLines=()=>$("kt").value.split(/\r?\n/).map(s=>s.trim()).filter(s=>s&&!s.startsWith("#"));
+// a CSV export from a key site: take only the key code (column "code"), and only rows that are still "active"
+function csvKeys(text){
+ const out=[];let col=-1,st=-1;
+ for(const raw of String(text).split(/\r?\n/)){
+  let l=raw.trim();if(!l||l.startsWith("#"))continue;
+  if(l.includes(",")||l[0]==='"'){
+   const row=[];let cur="",q=false;
+   for(let i=0;i<l.length;i++){const c=l[i];if(q){if(c==='"'){if(l[i+1]==='"'){cur+='"';i++;}else q=false;}else cur+=c;}else if(c==='"')q=true;else if(c===","){row.push(cur);cur="";}else cur+=c;}
+   row.push(cur);const low=row.map(x=>x.trim().toLowerCase());
+   if(low.includes("code")&&(low.includes("status")||low.includes("product")||low.length>1)){col=low.indexOf("code");st=low.indexOf("status");continue;}
+   if(col>=0&&col<row.length){if(st>=0&&st<row.length&&!["active",""].includes(row[st].trim().toLowerCase()))continue;l=row[col].trim();}
+   else if(row.length>1)l=row[0].trim();
+  }
+  if(l)out.push(l);
+ }
+ return out;
+}
+const keyLines=()=>csvKeys($("kt").value);
 let kTimer=null,kSeq=0;
 function kPreviewSoon(){clearTimeout(kTimer);const n=keyLines().length;$("kcount").textContent=n?plural(n,"key")+" "+t("pasted"):"";$("kadd").disabled=true;
  if(!n){$("kprev").innerHTML="";return;}kTimer=setTimeout(kPreview,350);}
@@ -5004,7 +5050,7 @@ $("kt").oninput=kPreviewSoon;
 function loadKeyFiles(files){
  const list=[...files].filter(f=>f.size<=400000).slice(0,5);if(!list.length){toast(t("File too large."),"");return;}
  if(page()!=="keys")location.hash="#keys";
- Promise.all(list.map(f=>f.text())).then(texts=>{const add=texts.join("\n");
+ Promise.all(list.map(f=>f.text())).then(texts=>{const add=texts.map(x=>csvKeys(x).join("\n")).join("\n");
   $("kt").value=($("kt").value?$("kt").value.replace(/\s*$/,"\n"):"")+add;kPreviewSoon();$("kt").scrollIntoView({block:"nearest"});});
 }
 $("kf").onchange=e=>{loadKeyFiles(e.target.files);e.target.value="";};
