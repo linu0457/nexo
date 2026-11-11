@@ -547,7 +547,7 @@ def fetch_reviewed_orders_all(client, full=False):
     only the newest page on the quick ones in between. Everything found is remembered."""
     from review_alerts import STATES
     found = _rev_cache["orders"]
-    for state in STATES:
+    for state in list(STATES) + ["Canceled"]:      # cancelled orders can carry a review too (Eldorado counts them)
         d = _order_page(client, state)
         res = d.get("results") or []
         seen = {o.get("id") for o in res}
