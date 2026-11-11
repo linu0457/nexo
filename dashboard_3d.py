@@ -564,6 +564,8 @@ def fetch_reviewed_orders_all(client, full=False):
             if not full or not cursor or not res or pages >= 100:   # 100 pages = 5000 orders per state
                 break
             time.sleep(0.25)
+        if full:
+            print(f"Reviews: scanned {state}: {pages} page(s), {len(found)} reviews found so far", flush=True)
     return list(found.values())
 
 
