@@ -1,38 +1,36 @@
-"""Shows how Eldorado pages through your orders (no names, no keys are printed). Run: py diagnose_reviews.py"""
+"""Tests the page-by-page reading of your orders (no names or keys are printed). Run: py diagnose_reviews.py"""
 from eldorado_client import EldoradoClient
 
 c = EldoradoClient()
 URL = "/api/v1/orders/me/seller/orders"
-
-
-def get(state, **extra):
-    p = {"displayFilter": "DisplaySellingOrders", "orderState": state, "isAscendingDateOrder": "false", "pageSize": 50}
-    p.update(extra)
-    try:
-        return c.request("GET", URL, params=p) or {}
-    except Exception as e:
-        return {"__error__": str(e)[:200]}
-
-
-for state in ("Received", "Completed", "Delivered", "PendingReview"):
+total = {}
+for state in ("Received", "Completed", "Delivered"):
+    cursor, pages, orders, reviews, prev = None, 0, 0, 0, None
     print(f"\n=== {state} ===")
-    d = get(state)
-    if "__error__" in d:
-        print("  error:", d["__error__"]); continue
-    res = d.get("results") or []
-    print("  results:", len(res), "| with review:", sum(1 for o in res if o.get("review")))
-    print("  other fields in the answer:", {k: v for k, v in d.items() if k != "results" and not isinstance(v, (list, dict))})
-    print("  list/dict fields:", [k for k, v in d.items() if k != "results" and isinstance(v, (list, dict))])
-    first = {o.get("id") for o in res}
-    if len(res) < 50:
-        print("  (fewer than 50 -> no more pages in this state)"); continue
-    for name in ("pageIndex", "pageNumber", "page", "pageNo", "currentPage", "offset", "skip"):
-        for val in ((0, 1, 2, 50) if name in ("offset", "skip") else (0, 1, 2)):
-            r = get(state, **{name: val})
-            if "__error__" in r:
-                print(f"  {name}={val}: error {r['__error__'][:80]}"); continue
-            ids = {o.get("id") for o in (r.get("results") or [])}
-            print(f"  {name}={val}: {len(ids)} orders, {len(ids - first)} new")
-    r = get(state, pageSize=100)
-    print("  pageSize=100 ->", len(r.get("results") or []), "orders")
-input("\nDone. Take a picture / copy this and send it. Press Enter to close.")
+    while pages < 100:
+        p = {"displayFilter": "DisplaySellingOrders", "orderState": state, "isAscendingDateOrder": "false", "pageSize": 50}
+        if cursor:
+            p["cursor"] = cursor
+            p["pageDirection"] = "Next"
+        try:
+            d = c.request("GET", URL, params=p) or {}
+        except Exception as e:
+            print(f"  page {pages + 1}: ERROR {str(e)[:150]}")
+            break
+        res = d.get("results") or []
+        ids = {o.get("id") for o in res}
+        pages += 1
+        if prev is not None and ids <= prev:
+            print(f"  page {pages}: same orders as the page before -> the cursor is NOT understood")
+            break
+        prev = ids
+        orders += len(res)
+        reviews += sum(1 for o in res if o.get("review"))
+        print(f"  page {pages}: {len(res)} orders, {sum(1 for o in res if o.get('review'))} with review, next cursor: {'yes' if d.get('nextPageCursor') else 'no'}")
+        cursor = d.get("nextPageCursor")
+        if not cursor or not res:
+            break
+    total[state] = reviews
+    print(f"  -> {orders} orders, {reviews} reviews in {state}")
+print(f"\nREVIEWS IN TOTAL (Received + Completed): {total['Received'] + total['Completed']}   (Eldorado shows 88)")
+input("\nSend me this text/picture. Press Enter to close.")

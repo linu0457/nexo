@@ -548,7 +548,7 @@ def fetch_reviewed_orders_all(client, full=False):
     from review_alerts import STATES
     found = _rev_cache["orders"]
     for state in STATES:
-        cursor, pages = None, 0
+        cursor, pages, prev_ids = None, 0, None
         while True:
             try:
                 res, cursor = _order_page(client, state, cursor)
@@ -558,6 +558,11 @@ def fetch_reviewed_orders_all(client, full=False):
                 print(f"Reviews: stopped paging {state} after {pages} pages ({e})", flush=True)
                 break
             pages += 1
+            ids = {o.get("id") for o in res}
+            if prev_ids is not None and ids <= prev_ids:   # the same orders again: the cursor was not understood
+                print(f"Reviews: {state}: page {pages} was the same as the one before, stopping.", flush=True)
+                break
+            prev_ids = ids
             for o in res:
                 if o.get("id") and o.get("review"):
                     found[o["id"]] = o
