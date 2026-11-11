@@ -614,7 +614,10 @@ def refresh_reviews(client):
                 txt = r["text"][:100]
                 notify_event("reviews", {"da": ("Dårlig anmeldelse", f"{r['buyer']}: {txt or 'ingen tekst'}"),
                                          "en": ("Bad review", f"{r['buyer']}: {txt or 'no text'}")}, "/#reviews")
-    return {"positive": sum(1 for r in rows if r["rating"] == "Positive"),
+    # good reviews on orders older than Eldorado's API shows (before 19 Oct): they never come back, so a fixed number.
+    # Change it with REVIEWS_OLDER_POSITIVE=<number> in .env (0 = off).
+    older = int(os.getenv("REVIEWS_OLDER_POSITIVE", "3") or 0)
+    return {"positive": sum(1 for r in rows if r["rating"] == "Positive") + older,
             "negative": sum(1 for r in rows if r["rating"] == "Negative"), "items": rows[:40]}
 
 
