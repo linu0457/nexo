@@ -105,12 +105,33 @@ PAUSE_ON_ERROR = 300   # seconds to wait when Eldorado refuses keys (limit per r
 FILL = "Scroll Down"   # shown in the username/password/email/MFA fields (the real key is in Additional info)
 
 
+MAX_INFO = 1000   # Eldorado: Additional info may be at most 1000 characters
+
+
+def tidy_info(text):
+    """Removes what only takes up room: Windows line breaks, spaces at line ends, extra blank lines."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = "\n".join(l.rstrip() for l in text.split("\n"))
+    while "\n\n\n" in text:
+        text = text.replace("\n\n\n", "\n\n")
+    return text.strip()
+
+
+def check_info_length(info, key="XXXX-XXXX-XXXX-XXXX-X"):
+    n = len(tidy_info(info).replace(PLACEHOLDER, key))
+    if n > MAX_INFO:
+        raise SystemExit(f"STOPPED: additional_info.txt is too long. With a key in it the text is {n} characters, but "
+                         f"Eldorado allows at most {MAX_INFO}. Shorten additional_info.txt by at least {n - MAX_INFO} "
+                         f"characters (or remove blank lines) and start again.")
+    return n
+
+
 def account_body(info, key, fill=FILL):
     return {"structuredDetails": {
         "accountDetails": {"accountLogin": fill, "accountPassword": fill},
         "emailDetails": {"emailProviderUrl": fill, "emailLogin": fill, "emailPassword": fill},
         "mfaDetails": {"mfaLogin": fill, "mfaPassword": fill},
-        "additionalInfo": info.replace(PLACEHOLDER, key),
+        "additionalInfo": tidy_info(info).replace(PLACEHOLDER, key),
     }}
 
 
@@ -128,6 +149,8 @@ def quantity(client, offer_id):
 def add_keys(client, offer_id, info, keys):
     """Adds the keys one by one. Returns (added_keys, error_code_or_None). Moves added keys to keys_used.txt."""
     done, error = [], None
+    if keys:
+        check_info_length(info, max(keys, key=len))
     try:
         for key in keys:
             try:
@@ -136,7 +159,7 @@ def add_keys(client, offer_id, info, keys):
                                    json=account_body(info, key))
                 except requests.HTTPError as e0:
                     # if Eldorado does not accept the text in some field, fall back to the old "." filler
-                    if e0.response is not None and e0.response.status_code in (400, 422):
+                    if e0.response is not None and e0.response.status_code in (400, 422) and "maximum length" not in e0.response.text:
                         print(f"Eldorado did not accept '{FILL}' in the fields ({e0.response.status_code}), retrying with '.'")
                         client.request("POST", f"/api/flexibleOffersUser/me/offers/{offer_id}/secretDetails",
                                        json=account_body(info, key, "."))
@@ -355,6 +378,7 @@ def main():
     if a.mode == "auto":
         print(f"Offer    : {offer.get('offerTitle')}  (state: {offer.get('offerState')})")
         print(f"Stock now: {offer.get('quantity')}")
+        print(f"Additional info: {check_info_length(info)} of {MAX_INFO} characters (with a key in it)")
         try:
             auto(client, offer_id, info, a.target, a.batch, a.every, offer.get("offerTitle") or "?")
         except KeyboardInterrupt:
