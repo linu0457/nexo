@@ -521,11 +521,85 @@ def refresh_stock(client):
 _seen_neg = {"v": None}
 
 
+def _recent(iso, days=7):
+    try:
+        return datetime.now(timezone.utc) - datetime.fromisoformat(iso) < timedelta(days=days)
+    except ValueError:
+        return True
+
+
+_page_param = {"v": None}      # which query parameter Eldorado uses for page number, found automatically: (name, first_index)
+_rev_cache = {"orders": {}, "full_at": 0.0}
+
+
+def _order_page(client, state, extra=None):
+    params = {"displayFilter": "DisplaySellingOrders", "orderState": state,
+              "isAscendingDateOrder": "false", "pageSize": 50}
+    params.update(extra or {})
+    return (client.request("GET", "/api/v1/orders/me/seller/orders", params=params) or {}).get("results") or []
+
+
+def _find_page_param(client, state, first_ids):
+    """Eldorado's swagger names are not known here, so try the usual ones until page 2 gives other orders."""
+    for name in ("pageIndex", "pageNumber", "page"):
+        try:
+            for start in (1, 2):
+                res = _order_page(client, state, {name: start})
+                ids = {o.get("id") for o in res if o.get("id")}
+                if ids and not ids <= first_ids:
+                    return (name, start)   # `start` is the 2nd page -> next ones are start+1, start+2 ...
+        except Exception:
+            continue
+    return None
+
+
+def fetch_reviewed_orders_all(client, full=False):
+    """Orders with a review, as many as Eldorado lets us read: every page (50 per page) on a full scan,
+    only the newest page on the quick ones in between. Everything found is remembered."""
+    from review_alerts import STATES
+    found = _rev_cache["orders"]
+    for state in STATES:
+        first = _order_page(client, state)
+        for o in first:
+            if o.get("id") and o.get("review"):
+                found[o["id"]] = o
+        if not full or len(first) < 50:
+            continue
+        first_ids = {o.get("id") for o in first if o.get("id")}
+        if _page_param["v"] is None:
+            _page_param["v"] = _find_page_param(client, state, first_ids) or False
+            print(f"Reviews: page parameter = {_page_param['v']}", flush=True)
+        if not _page_param["v"]:
+            continue
+        name, idx = _page_param["v"]
+        seen = set(first_ids)
+        for n in range(idx, idx + 100):          # up to 100 pages = 5000 orders per state
+            try:
+                res = _order_page(client, state, {name: n})
+            except Exception:
+                break
+            new = [o for o in res if o.get("id") and o["id"] not in seen]
+            if not new:
+                break
+            for o in new:
+                seen.add(o["id"])
+                if o.get("review"):
+                    found[o["id"]] = o
+            if len(res) < 50:
+                break
+            time.sleep(0.25)
+    return list(found.values())
+
+
 def refresh_reviews(client):
     from order_alerts import order_time
-    from review_alerts import fetch_reviewed_orders, pretty_tag
+    from review_alerts import pretty_tag
+    now = time.time()
+    full = now - _rev_cache["full_at"] > 1800      # a full scan at start and every 30 minutes
+    if full:
+        _rev_cache["full_at"] = now
     rows = []
-    for o in fetch_reviewed_orders(client):
+    for o in fetch_reviewed_orders_all(client, full):
         r = o.get("review") or {}
         d = o.get("orderOfferDetails") or {}
         rows.append({
@@ -540,7 +614,7 @@ def refresh_reviews(client):
     prev, _seen_neg["v"] = _seen_neg["v"], {sig(r) for r in rows if r["rating"] == "Negative"}
     if prev is not None:
         for r in rows:
-            if r["rating"] == "Negative" and sig(r) not in prev:
+            if r["rating"] == "Negative" and sig(r) not in prev and _recent(r["time"]):
                 txt = r["text"][:100]
                 notify_event("reviews", {"da": ("Dårlig anmeldelse", f"{r['buyer']}: {txt or 'ingen tekst'}"),
                                          "en": ("Bad review", f"{r['buyer']}: {txt or 'no text'}")}, "/#reviews")
