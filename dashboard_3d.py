@@ -1178,6 +1178,7 @@ def api_data():
         d["profit"] = profit_brief()
         d["unitcosts"] = load_unitcosts()
         d["alarms"] = prog_alarms()
+    d["security"] = security_state(u["role"] == "admin")
     # nothing new since the last answer: send a tiny reply instead of the whole page of numbers again
     h = hashlib.md5(json.dumps({k: v for k, v in d.items() if k != "updated"}, sort_keys=True).encode()).hexdigest()[:16]
     if request.args.get("h") == h:
@@ -2683,6 +2684,146 @@ def prog_alarms():
     return out
 
 
+# ---------- security: look for hidden malware in the program folder (every 30 minutes) ----------
+# The words below are built from pieces, so this file never matches its own rules.
+
+SEC_EVERY = max(5, int(os.getenv("SECURITY_EVERY_MIN", "30") or 30)) * 60
+SEC_DIR = Path(os.getenv("SECURITY_DIR", "") or HERE)
+_sec_lock = threading.Lock()
+_sec = {"checked": None, "files": 0, "findings": [], "scans": 0}
+_sec_pushed = ""
+
+_SEC_TEXT_EXT = {".py", ".pyw", ".bat", ".cmd", ".ps1", ".vbs", ".hta", ".wsf", ".js", ".sh"}
+_SEC_EXE_EXT = {".exe", ".dll", ".scr", ".com", ".msi", ".pif", ".hta", ".vbs", ".wsf", ".jar", ".lnk", ".ps1"}
+_SEC_SKIP_DIR = {"__pycache__", "node_modules", "venv", ".venv", "site-packages", "karantaene"}
+_SEC_B64 = re.compile("a" + "HR0" + "cDov|" + "a" + "HR0" + "cHM6")
+_SEC_IPURL = re.compile(r"https?://((?:\d{1,3}\.){3}\d{1,3})")
+_SEC_EXEC = re.compile(r"\b(?:ex" + r"ec|ev" + r"al)\s*\(\s*(?:base64|zlib|codecs|marshal|bytes\.fromhex)")
+_SEC_PS = "power" + "shell"
+_SEC_DL = tuple(x[0] + x[1] for x in (("downloadf", "ile"), ("downloads", "tring"), ("invoke-web", "request"), ("bits", "admin"),
+                                      ("certu", "til -urlcache"), ("net.web", "client"), ("start-bits", "transfer")))
+_SEC_HEAD = "auto-gen" + "erated; do not edit"
+_SEC_ALLOW = {"caddy.exe", "nssm.exe", "cloudflared.exe"} | {x.strip().lower() for x in os.getenv("SECURITY_ALLOW", "").split(",") if x.strip()}
+_SEC_TMPEXE = re.compile(r"^[0-9a-f]{32}\.exe$", re.I)
+
+
+def _sec_private_ip(ip):
+    p = [int(x) for x in ip.split(".")]
+    return (p[0] in (10, 127) or (p[0] == 192 and p[1] == 168) or (p[0] == 172 and 16 <= p[1] <= 31)
+            or (p[0] == 169 and p[1] == 254) or p[0] == 0 or any(x > 255 for x in p))
+
+
+def scan_text(text):
+    """Returns the reasons (as (text, detail, line)) why this code looks like malware. Used by the scanner."""
+    out = []
+    low = text.lower()
+    if _SEC_HEAD in low[:400]:
+        out.append(("Hidden download-and-run code (dropper) at the top of the file", "", 1))
+    m = _SEC_B64.search(text)
+    if m:
+        out.append(("Hidden encoded web link", "", text.count("\n", 0, m.start()) + 1))
+    for m in _SEC_IPURL.finditer(text):
+        if not _sec_private_ip(m.group(1)):
+            out.append(("Link to a raw IP address (not a normal website)", m.group(1), text.count("\n", 0, m.start()) + 1))
+            break
+    m = _SEC_EXEC.search(text)
+    if m:
+        out.append(("Runs hidden encoded code", "", text.count("\n", 0, m.start()) + 1))
+    if _SEC_PS in low and any(x in low for x in _SEC_DL):
+        i = min(low.find(x) for x in _SEC_DL if x in low)
+        out.append(("Hidden PowerShell that downloads files", "", text.count("\n", 0, i) + 1))
+    seen, res = set(), []
+    for r in out:
+        if r[0] not in seen:
+            seen.add(r[0])
+            res.append(r)
+    return res
+
+
+def run_security_scan(base=None):
+    """Looks through the program folder (and Temp) for hidden malware. Returns the new state."""
+    base = Path(base or SEC_DIR)
+    findings, n = [], 0
+    try:
+        for root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in _SEC_SKIP_DIR]
+            if str(Path(root)) != str(base) and len(Path(root).relative_to(base).parts) > 3:
+                dirs[:] = []
+            for fn in files:
+                p = Path(root) / fn
+                ext = p.suffix.lower()
+                rel = str(p.relative_to(base)).replace("\\", "/")
+                if ext in _SEC_EXE_EXT and ext not in _SEC_TEXT_EXT:
+                    if fn.lower() in _SEC_ALLOW:
+                        continue
+                    findings.append({"file": rel, "why": "Program file that does not belong in this folder", "detail": "", "line": 0})
+                    n += 1
+                    continue
+                if ext not in _SEC_TEXT_EXT:
+                    continue
+                try:
+                    if p.stat().st_size > 6_000_000:
+                        continue
+                    text = p.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                n += 1
+                for why, detail, line in scan_text(text):
+                    findings.append({"file": rel, "why": why, "detail": detail, "line": line})
+    except OSError:
+        pass
+    try:
+        tmp = Path(os.getenv("TEMP") or os.getenv("TMP") or "")
+        if os.name == "nt" and tmp.is_dir():
+            for p in tmp.iterdir():
+                if _SEC_TMPEXE.match(p.name):
+                    findings.append({"file": "Temp/" + p.name, "why": "Suspicious program in the Temp folder (like the hidden downloader leaves)", "detail": "", "line": 0})
+    except OSError:
+        pass
+    st = {"checked": datetime.now(timezone.utc).isoformat(timespec="seconds"), "files": n, "findings": findings[:60]}
+    with _sec_lock:
+        _sec["scans"] += 1
+        st["scans"] = _sec["scans"]
+        _sec.update(st)
+    return security_state(True)
+
+
+def security_state(admin=True):
+    with _sec_lock:
+        s = dict(_sec)
+        f = list(s["findings"])
+    return {"checked": s["checked"], "files": s["files"], "bad": len(f) > 0, "count": len(f),
+            "findings": f if admin else [], "every": SEC_EVERY // 60}
+
+
+def _security_loop():
+    global _sec_pushed
+    time.sleep(3)
+    while True:
+        try:
+            st = run_security_scan()
+            sig = "|".join(sorted(f["file"] + f["why"] for f in st["findings"]))
+            if st["bad"] and sig != _sec_pushed:
+                names = ", ".join(sorted({f["file"] for f in st["findings"]})[:4])
+                print("SECURITY: harmful code found in: " + names, flush=True)
+                notify_event("security", {"da": ("⚠ Skadelig kode fundet", "Der er fundet skadelige ting i filerne: " + names),
+                                          "en": ("⚠ Harmful code found", "Harmful things were found in the files: " + names)}, "/")
+            elif not st["bad"] and _sec_pushed:
+                print("SECURITY: the files are clean again.", flush=True)
+            _sec_pushed = sig if st["bad"] else ""
+        except Exception as e:
+            print("Security scan failed:", type(e).__name__, e, flush=True)
+        time.sleep(SEC_EVERY)
+
+
+@app.route("/api/security/scan", methods=["POST"])
+def api_security_scan():
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    return jsonify(run_security_scan())
+
+
 # ---------- app (PWA): manifest, icons, service worker ----------
 
 
@@ -3817,6 +3958,23 @@ body.hide .b3c,body.hide .rc b,body.hide .rc em,body.hide .rc s,body.hide .pmsg,
 body.hide .b3tip{display:none!important}
 body.hide .taxpot small,body.hide #stocksum{filter:blur(12px);user-select:none}
 body.hide .welcome .w2,body.hide .mny,body.hide #pendsum,body.hide #calsum,body.hide .toast2 span{filter:blur(12px);user-select:none}
+
+/* red full-screen security alarm */
+#redscreen{position:fixed;inset:0;z-index:2147483000;background:#c00000;color:#fff;display:flex;overflow:auto;padding:24px;animation:redflash 1s steps(2,jump-none) infinite;font-family:inherit}
+#redscreen .redbox{max-width:760px;width:100%;text-align:center;margin:auto}
+#redscreen .redic{font-size:clamp(56px,12vw,90px);line-height:1;text-shadow:0 4px 30px rgba(0,0,0,.5)}
+#redscreen h1{font-size:clamp(26px,6vw,52px);font-weight:900;margin:8px 0 12px;letter-spacing:.5px;line-height:1.1;color:#fff}
+#redscreen .redp{font-size:clamp(16px,2.6vw,20px);font-weight:600;margin:0 0 14px;color:#fff}
+#redscreen ul{list-style:none;margin:0 0 14px;padding:0;text-align:left;max-height:30vh;overflow:auto}
+#redscreen li{background:rgba(0,0,0,.35);border-radius:10px;padding:9px 12px;margin:6px 0;font-size:14px;word-break:break-all}
+#redscreen .redwhat{background:rgba(0,0,0,.4);border-radius:12px;padding:12px 14px;margin:10px 0 16px;font-size:15px;text-align:left;line-height:1.5}
+#redscreen .redbtns{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin:8px 0}
+#redscreen button{background:#fff;color:#a00000;border:0;border-radius:12px;padding:12px 20px;font-weight:800;font-size:15px;cursor:pointer}
+#redscreen button:disabled{opacity:.6}
+#redscreen .redsmall{font-size:13px;opacity:.9;margin-top:8px;color:#fff}
+body.redon{overflow:hidden}
+@keyframes redflash{0%{background:#c00000}50%{background:#7a0000}}
+@media (prefers-reduced-motion:reduce){#redscreen{animation:none}}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
@@ -4399,6 +4557,28 @@ const DA={
 "Empty": "Tom",
 "Drag to turn": "Træk for at dreje",
 "now": "nu",
+"HARMFUL THINGS FOUND IN THE FILES": "SKADELIGE TING FUNDET I FILERNE",
+"Harmful code was found in the program files. Do not trust this computer until it is cleaned.": "Der er fundet skadelig kode i programfilerne. Stol ikke på denne computer, før den er renset.",
+"What to do": "Det skal du gøre",
+"1. Close the programs. 2. Run rens_filer.bat to remove it. 3. Change your passwords and keys (Eldorado, Discord, elitekeys). 4. Scan the computer with Windows Security.": "1. Luk programmerne. 2. Kør rens_filer.bat for at fjerne det. 3. Skift dine passwords og nøgler (Eldorado, Discord, elitekeys). 4. Scan computeren med Windows Sikkerhed.",
+"Scan again now": "Scan igen nu",
+"Mute the siren": "Sluk alarmlyden",
+"Turn the siren on": "Tænd alarmlyden",
+"Tap anywhere to start the siren": "Tryk et sted for at starte alarmlyden",
+"Last checked": "Sidst tjekket",
+"Checked every 30 minutes": "Tjekkes hver 30. minut",
+"Scanning...": "Scanner...",
+"Still harmful things in the files.": "Der er stadig skadelige ting i filerne.",
+"The files are clean.": "Filerne er rene.",
+"Ask the owner of the shop to look at this.": "Bed ejeren af shoppen om at se på det.",
+"Hidden download-and-run code (dropper) at the top of the file": "Skjult kode der henter og kører et program (dropper) øverst i filen",
+"Hidden encoded web link": "Skjult kodet web-link",
+"Link to a raw IP address (not a normal website)": "Link til en rå IP-adresse (ikke en normal hjemmeside)",
+"Runs hidden encoded code": "Kører skjult kodet kode",
+"Hidden PowerShell that downloads files": "Skjult PowerShell der henter filer",
+"Program file that does not belong in this folder": "Programfil der ikke hører til i denne mappe",
+"Suspicious program in the Temp folder (like the hidden downloader leaves)": "Mistænkeligt program i Temp-mappen (som den skjulte downloader efterlader)",
+"line": "linje",
 "New design - preview": "Ny udgave - test (den rigtige side er urørt)",
 "Animated background and effects": "Animeret baggrund og effekter",
 "Moving light, sparkles, 3D cards and count-up numbers. Turn off on a slow device. Only on this device.": "Bevægeligt lys, gnister, 3D-kort og tal der tæller op. Slå fra på en langsom enhed. Kun på denne enhed.",
@@ -4747,6 +4927,45 @@ function alarmUi(al){
  a.hidden=false;a.innerHTML="⚠ "+t(al.length>1?"PROGRAMS ARE DOWN":"PROGRAM IS DOWN")+": "+esc(al.map(x=>x.name).join(", "))+`<small>${t("The dashboard tries to start them again by itself. Tap to see why.")}</small>`;
  document.documentElement.style.setProperty("--alh",(a.offsetHeight+4)+"px");
 }
+const ssGet=k=>{try{return sessionStorage.getItem(k);}catch(e){return null;}};const ssSet=(k,v)=>{try{sessionStorage.setItem(k,v);}catch(e){}};
+let _sirenCtx=null,_sirenTimer=null,_sirenOn=false;
+function sirenStop(){if(_sirenTimer){clearInterval(_sirenTimer);_sirenTimer=null;}try{if(_sirenCtx){_sirenCtx.close();}}catch(e){}_sirenCtx=null;_sirenOn=false;}
+function sirenStart(){
+ if(_sirenOn||ssGet("nexo_siren_mute")==="1")return;
+ try{
+  const AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;
+  const c=new AC();const o=c.createOscillator(),g=c.createGain();
+  o.type="sawtooth";g.gain.value=.22;o.connect(g);g.connect(c.destination);o.start();
+  let hi=false;const sw=()=>{hi=!hi;o.frequency.setValueAtTime(hi?980:620,c.currentTime);};sw();
+  _sirenTimer=setInterval(sw,450);_sirenCtx=c;_sirenOn=true;
+  const nudge=()=>{if(_sirenCtx&&_sirenCtx.state==="suspended")_sirenCtx.resume();};
+  nudge();
+  const hint=document.getElementById("redhint");if(hint)hint.hidden=c.state!=="suspended";
+ }catch(e){}
+}
+function securityUi(sec){
+ let r=document.getElementById("redscreen");
+ if(!sec||!sec.bad){if(r)r.remove();document.body.classList.remove("redon");sirenStop();return;}
+ document.body.classList.add("redon");
+ if(!r){
+  r=document.createElement("div");r.id="redscreen";document.body.appendChild(r);
+  const wake=()=>{if(_sirenCtx&&_sirenCtx.state==="suspended"){_sirenCtx.resume().then(()=>{const h=document.getElementById("redhint");if(h)h.hidden=true;});}else if(!_sirenOn){sirenStart();}};
+  ["pointerdown","keydown","touchstart"].forEach(ev=>window.addEventListener(ev,wake,{passive:true}));
+ }
+ const f=sec.findings||[];
+ const byF={};f.forEach(x=>{(byF[x.file]=byF[x.file]||[]).push(x);});
+ const list=f.length?`<ul>${Object.keys(byF).map(k=>`<li><b>${esc(k)}</b><br>${byF[k].map(x=>esc(t(x.why))+(x.detail?" "+esc(x.detail):"")+(x.line?` <i>(${t("line")} ${x.line})</i>`:"")).join("<br>")}</li>`).join("")}</ul>`:`<p class="redp">${t("Ask the owner of the shop to look at this.")}</p>`;
+ const muted=ssGet("nexo_siren_mute")==="1";
+ const html=`<div class="redbox"><div class="redic">⚠</div><h1>${t("HARMFUL THINGS FOUND IN THE FILES")}</h1><p class="redp">${t("Harmful code was found in the program files. Do not trust this computer until it is cleaned.")}</p>${list}
+ ${f.length?`<div class="redwhat"><b>${t("What to do")}</b><br>${t("1. Close the programs. 2. Run rens_filer.bat to remove it. 3. Change your passwords and keys (Eldorado, Discord, elitekeys). 4. Scan the computer with Windows Security.")}</div>`:""}
+ <div class="redbtns">${isAdmin?`<button id="redscan">${t("Scan again now")}</button>`:""}<button id="redmute">${muted?t("Turn the siren on"):t("Mute the siren")}</button></div>
+ <div class="redsmall" id="redhint" hidden>${t("Tap anywhere to start the siren")}</div>
+ <div class="redsmall">${t("Last checked")}: ${sec.checked?ago(sec.checked):"-"} · ${t("Checked every 30 minutes")}</div></div>`;
+ if(r.dataset.h!==html){r.innerHTML=html;r.dataset.h=html;}
+ const mb=document.getElementById("redmute");if(mb)mb.onclick=()=>{const m=ssGet("nexo_siren_mute")==="1";if(m){ssSet("nexo_siren_mute","");sirenStart();}else{ssSet("nexo_siren_mute","1");sirenStop();}r.dataset.h="";securityUi(sec);};
+ const sb=document.getElementById("redscan");if(sb)sb.onclick=async()=>{sb.textContent=t("Scanning...");sb.disabled=true;try{const x=await post("/api/security/scan");const j=await x.json();securityUi(j);}catch(e){}if(sb.isConnected){sb.disabled=false;sb.textContent=t("Scan again now");}};
+ if(!_sirenOn)sirenStart();
+}
 function tiles(d){
  const s=d.sales,cur=esc(shownCur()),r=s.records;
  const tile0=(mod,l,key,v,sub,extra)=>`<div class="tile" data-mod="${mod}" data-help="${key}"><div class="l">${l} ${extra||""}</div><div class="v">${cuHtml(key,mv(v))} <small>${cur}</small></div><div class="s">${sub}</div></div>`;
@@ -4986,7 +5205,7 @@ function render(d){
  if(!prefsApplied){prefsApplied=true;applyServerPrefs(d.prefs);translateStatic();setTitle();settingsUi();}
  const q=$("quote");q.hidden=!d.quote;q.textContent=d.quote||"";
  $("who").textContent=d.user.name;$("role").textContent=t(d.user.role==="admin"?"admin":"viewer");$("av").textContent=d.user.name.slice(0,1);
- curUi();detectEvents(d);once("alarm",[d.alarms,LANG],()=>alarmUi(d.alarms||[]));newsNav();once("menu",[PREFS.menu,PREFS.pins,isAdmin],applyMenu);once("ovs",[PREFS.ovorder],ovStyle);once("tax",[d.profit,PREFS.tax,PREFS.hide,K0()],()=>taxpot(d));
+ curUi();detectEvents(d);once("alarm",[d.alarms,LANG],()=>alarmUi(d.alarms||[]));securityUi(d.security);newsNav();once("menu",[PREFS.menu,PREFS.pins,isAdmin],applyMenu);once("ovs",[PREFS.ovorder],ovStyle);once("tax",[d.profit,PREFS.tax,PREFS.hide,K0()],()=>taxpot(d));
  const p=page(),K=[GROSS,shownCur(),HIDE,LANG];
  if(p==="overview"){applyHides();once("status",[d.status,K],()=>statusPanel(d));once("welcome",[d.sales,d.reviews,d.pending.n,d.keys.left,K],()=>welcome(d));
   once("tiles",[d.sales,d.stock.units,d.stock.offers.length,d.profit,d.orders[0],d.reviews,PREFS.hide,K],()=>tiles(d));$("cur1").textContent=shownCur()+" · "+feeNote();$("mt1").textContent=monthTitle();
@@ -7073,6 +7292,7 @@ def main():
             start_programs(only or None)
             print("Starting the other programs: " + ", ".join(n for n, _, _ in PROGRAM_LIST if not only or n in only))
 
+    threading.Thread(target=_security_loop, daemon=True).start()
     print(f"Dashboard on http://localhost:{PORT}  (stop with Ctrl+C)")
     try:
         from waitress import serve
