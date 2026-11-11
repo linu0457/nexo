@@ -532,14 +532,14 @@ _rev_cache = {"orders": {}, "full_at": 0.0}
 
 
 def _order_page(client, state, cursor=None):
-    """One page of orders. Eldorado pages with a cursor: the answer carries nextPageCursor, which goes into the next call."""
+    """One page of orders (answer as a dict). Eldorado pages with a cursor taken from the answer; with the newest
+    orders first, pageDirection=Previous is the way to older orders (found by testing against the real API)."""
     params = {"displayFilter": "DisplaySellingOrders", "orderState": state,
               "isAscendingDateOrder": "false", "pageSize": 50}
     if cursor:
         params["cursor"] = cursor
-        params["pageDirection"] = "Next"
-    data = client.request("GET", "/api/v1/orders/me/seller/orders", params=params) or {}
-    return data.get("results") or [], data.get("nextPageCursor")
+        params["pageDirection"] = "Previous"
+    return client.request("GET", "/api/v1/orders/me/seller/orders", params=params) or {}
 
 
 def fetch_reviewed_orders_all(client, full=False):
@@ -548,29 +548,42 @@ def fetch_reviewed_orders_all(client, full=False):
     from review_alerts import STATES
     found = _rev_cache["orders"]
     for state in STATES:
-        cursor, pages, prev_ids = None, 0, None
-        while True:
-            try:
-                res, cursor = _order_page(client, state, cursor)
-            except Exception as e:
-                if pages == 0:
-                    raise
-                print(f"Reviews: stopped paging {state} after {pages} pages ({e})", flush=True)
+        d = _order_page(client, state)
+        res = d.get("results") or []
+        seen = {o.get("id") for o in res}
+        for o in res:
+            if o.get("id") and o.get("review"):
+                found[o["id"]] = o
+        pages, tried = 1, set()
+        cands = [d.get("nextPageCursor")]
+        while full and pages < 100:                    # 100 pages = 5000 orders per state
+            nxt = None
+            for cur in cands:
+                if not cur or cur in tried:
+                    continue
+                tried.add(cur)
+                try:
+                    d = _order_page(client, state, cur)
+                except Exception as e:
+                    print(f"Reviews: stopped paging {state} after {pages} pages ({e})", flush=True)
+                    d = None
+                    break
+                res = d.get("results") or []
+                new = [o for o in res if o.get("id") and o["id"] not in seen]
+                if new:
+                    nxt = d
+                    break
+            if not nxt:
                 break
             pages += 1
-            ids = {o.get("id") for o in res}
-            if prev_ids is not None and ids <= prev_ids:   # the same orders again: the cursor was not understood
-                print(f"Reviews: {state}: page {pages} was the same as the one before, stopping.", flush=True)
-                break
-            prev_ids = ids
-            for o in res:
-                if o.get("id") and o.get("review"):
+            for o in new:
+                seen.add(o["id"])
+                if o.get("review"):
                     found[o["id"]] = o
-            if not full or not cursor or not res or pages >= 100:   # 100 pages = 5000 orders per state
-                break
+            cands = [nxt.get("previousPageCursor"), nxt.get("nextPageCursor")]
             time.sleep(0.25)
         if full:
-            print(f"Reviews: scanned {state}: {pages} page(s), {len(found)} reviews found so far", flush=True)
+            print(f"Reviews: scanned {state}: {pages} page(s), {len(seen)} orders, {len(found)} reviews found so far", flush=True)
     return list(found.values())
 
 
