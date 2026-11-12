@@ -22,8 +22,31 @@ import offer as O
 from eldorado_client import EldoradoClient
 
 HERE = Path(__file__).resolve().parent
-INFO_2AR = None        # filled in below
-INFO_LIFETIME = None
+INFO_2AR = """🔴Your Key
+
+{KEY}
+
+
+🔵Netflix Key Tutorial
+
+1: Go to https://elitekeys.site/s/nexoshop
+2: Click the "Account Button"
+3: Create an Account using your email and a password of your choice.
+4: Go to the "Redeem" page and enter your key.
+5: Go to the "Inventory"
+6: Select your preferred device.
+7: Press the link for your device
+8: If the account stops working or it says payment issues press the get "Different Acc"
+9: Just pick a profile, it doesn't matter. If all profiles are locked press get "Different Acc"
+10: If the website won't load, use a VPN set to Switzerland (only for the website, not for Netflix). We are working on a fix.
+
+🔵Netflix Account Rules
+
+DO NOT change the password or email.
+DO NOT change the subscription plan.
+DO NOT create new profiles or edit existing profiles such as names.
+ONLY ALLOWED CHANGE: You may change the language setting."""
+INFO_LIFETIME = INFO_2AR   # same text for both for now; change INFO_LIFETIME here (or use additional_info_lifetime.txt)
 JOBS = [
     {"name": "2 Years", "words": "2 year", "info_file": "additional_info_2ar.txt", "info": INFO_2AR},
     {"name": "Lifetime", "words": "lifetime", "info_file": "additional_info_lifetime.txt", "info": INFO_LIFETIME},
