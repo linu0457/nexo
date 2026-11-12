@@ -1,16 +1,15 @@
 """Adds 10 keys to each of the two new Netflix offers (2 Years and Lifetime) - exactly the way offer.py does it for
-the 12-month offer, but with its own keys and its own Additional info text. No auto mode: it runs once and stops.
+the 12-month offer, but with its own Additional info text. No auto mode: it runs once and stops.
 
-Files (all in this folder):
-  keys_2ar.txt              one key per line for the 2 Years offer       (added keys move to keys_used_2ar.txt)
-  keys_lifetime.txt         one key per line for the Lifetime offer      (added keys move to keys_used_lifetime.txt)
-  additional_info_2ar.txt   Additional info for 2 Years      ({KEY} is replaced by the key)
-  additional_info_lifetime.txt  Additional info for Lifetime
+The keys come from keys.txt (the same file as the 12-month restock): the first 10 go to the 2 Years offer and the
+next 10 to the Lifetime offer. Added keys move to keys_used.txt, like always.
 
   py ligg_op_nye.py              -> add 10 keys to each offer
   py ligg_op_nye.py --antal 5    -> add 5 to each
   py ligg_op_nye.py --kun-se     -> only look: shows which offers it found and what it would add (changes nothing)
 Options if the offers are not found by their title:  --ar2 "2 year"   --lifetime "lifetime"
+Additional info: the texts are in this file (INFO_2AR / INFO_LIFETIME). A file additional_info_2ar.txt /
+additional_info_lifetime.txt next to the script overrides them if you make one.
 """
 import argparse
 import json
@@ -23,9 +22,11 @@ import offer as O
 from eldorado_client import EldoradoClient
 
 HERE = Path(__file__).resolve().parent
+INFO_2AR = None        # filled in below
+INFO_LIFETIME = None
 JOBS = [
-    {"name": "2 Years", "words": "2 year", "keys": "keys_2ar.txt", "used": "keys_used_2ar.txt", "info": "additional_info_2ar.txt"},
-    {"name": "Lifetime", "words": "lifetime", "keys": "keys_lifetime.txt", "used": "keys_used_lifetime.txt", "info": "additional_info_lifetime.txt"},
+    {"name": "2 Years", "words": "2 year", "info_file": "additional_info_2ar.txt", "info": INFO_2AR},
+    {"name": "Lifetime", "words": "lifetime", "info_file": "additional_info_lifetime.txt", "info": INFO_LIFETIME},
 ]
 STATES = ("Active", "Paused", "Draft", "PendingReview", "Inactive")
 
@@ -60,11 +61,26 @@ def find(offers, words):
     return hits
 
 
-def read_keys(path):
-    if not path.exists():
-        path.write_text("# put one key per line below this line\n", encoding="utf-8")
+def read_all_keys():
+    O.absorb_inbox()   # keys uploaded on the website first
+    if not O.KEYS_FILE.exists():
         return []
-    return [l.strip() for l in path.read_text(encoding="utf-8").splitlines() if l.strip() and not l.strip().startswith("#")]
+    return [l.strip() for l in O.KEYS_FILE.read_text(encoding="utf-8").splitlines() if l.strip() and not l.strip().startswith("#")]
+
+
+def reserve(keys):
+    """Takes these keys out of keys.txt right now, so the 12-month restock can never pick the same ones."""
+    gone = set(keys)
+    rest = [l for l in O.KEYS_FILE.read_text(encoding="utf-8").splitlines() if l.strip() and l.strip() not in gone]
+    O.KEYS_FILE.write_text("\n".join(rest) + ("\n" if rest else ""), encoding="utf-8")
+
+
+def give_back(keys):
+    """Keys that were NOT added go back to the front of keys.txt."""
+    if not keys:
+        return
+    have = O.KEYS_FILE.read_text(encoding="utf-8") if O.KEYS_FILE.exists() else ""
+    O.KEYS_FILE.write_text("\n".join(keys) + "\n" + have, encoding="utf-8")
 
 
 def main():
@@ -78,22 +94,6 @@ def main():
         JOBS[0]["words"] = a.ar2
     if a.lifetime:
         JOBS[1]["words"] = a.lifetime
-
-    # the Additional info files: made from your 12-month text the first time, then YOU change them
-    base = HERE / "additional_info.txt"
-    made = []
-    for j in JOBS:
-        p = HERE / j["info"]
-        if not p.exists() and base.exists():
-            p.write_text(base.read_text(encoding="utf-8"), encoding="utf-8")
-            made.append(j["info"])
-    if made:
-        print("Jeg har lavet disse filer som kopi af additional_info.txt (12 maaneder):")
-        for m in made:
-            print("   ", m)
-        print("\nAabn dem og ret teksten, saa den passer til de nye tilbud (fx 2 Years / Lifetime og garantien).")
-        print("Koer derefter filen igen. Der er ikke lagt noget op endnu.")
-        return
 
     client = EldoradoClient()
     offers = all_offers(client)
@@ -109,51 +109,59 @@ def main():
             print(f"Koer igen med fx  --{'ar2' if j is JOBS[0] else 'lifetime'} \"ord fra titlen\"")
             return
         o, st = hits[0]
-        info_p = HERE / j["info"]
-        if not info_p.exists():
-            print(f"{j['info']} findes ikke. Opret den (med {O.PLACEHOLDER} der hvor keyen skal staa).")
+        f = HERE / j["info_file"]
+        info = (f.read_text(encoding="utf-8") if f.exists() else (j["info"] or "")).rstrip()
+        if not info:
+            print(f"Additional info til '{j['name']}' mangler i scriptet.")
             return
-        info = info_p.read_text(encoding="utf-8").rstrip()
         if O.PLACEHOLDER not in info:
-            print(f"{j['info']} mangler {O.PLACEHOLDER} der hvor keyen skal staa.")
+            print(f"Additional info til '{j['name']}' mangler {O.PLACEHOLDER} der hvor keyen skal staa.")
             return
-        keys = read_keys(HERE / j["keys"])
-        plan.append((j, o, st, info, keys))
+        plan.append([j, o, st, info])
 
-    print("\nPLAN")
-    for j, o, st, info, keys in plan:
-        take = keys[:a.antal]
-        n = O.check_info_length(info, max(take, key=len) if take else "XXXX-XXXX-XXXX-XXXX-X")
+    keys = read_all_keys()
+    n = a.antal
+    chunks = [keys[i * n:(i + 1) * n] for i in range(len(plan))]
+    print("\nPLAN  (keys.txt har " + str(len(keys)) + " keys)")
+    for (j, o, st, info), take in zip(plan, chunks):
+        ln = O.check_info_length(info, max(take, key=len) if take else "XXXX-XXXX-XXXX-XXXX-X")
         print(f"  {j['name']}: '{title_of(o)}' (status: {st}, lager nu: {o.get('quantity')})")
-        print(f"     keys i {j['keys']}: {len(keys)}  ->  laegger {len(take)} op   (Additional info {n} af {O.MAX_INFO} tegn)")
+        print(f"     laegger {len(take)} keys op   (Additional info {ln} af {O.MAX_INFO} tegn)")
     if a.kun_se:
         print("\nKUN SE - der er ikke aendret noget.")
         return
+    if not keys:
+        print("\nIngen keys i keys.txt.")
+        return
 
-    for j, o, st, info, keys in plan:
-        todo = keys[:a.antal]
-        if not todo:
-            print(f"\n{j['name']}: ingen keys i {j['keys']} - springer over.")
-            continue
-        O.KEYS_FILE = HERE / j["keys"]
-        O.USED_FILE = HERE / j["used"]
-        oid = o["id"]
-        before = O.quantity(client, oid)
-        print(f"\n=== {j['name']}: laegger {len(todo)} keys op (lager foer: {before}) ===", flush=True)
-        added = 0
-        for attempt in range(6):
-            done, error = O.add_keys(client, oid, info, todo)
-            added += len(done)
-            todo = [k for k in todo if k not in done]
+    reserve([k for c in chunks for k in c])   # out of keys.txt now; whatever is not added goes back
+    try:
+        for (j, o, st, info), todo in zip(plan, chunks):
             if not todo:
-                break
-            if error == 403:
-                print("STOPPET: ingen tilladelse (403).")
-                break
-            print(f"Eldorado afviste nogle keys ({error}). Pause {O.PAUSE_ON_ERROR // 60} min, saa proever jeg de {len(todo)} resterende.", flush=True)
-            time.sleep(O.PAUSE_ON_ERROR)
-        after = O.quantity(client, oid)
-        print(f"{j['name']}: {added} lagt op. Lager {before} -> {after}. {len(todo)} key(s) ikke lagt op (ligger stadig i {j['keys']}).", flush=True)
+                print(f"\n{j['name']}: ikke flere keys i keys.txt - springer over.")
+                continue
+            oid = o["id"]
+            before = O.quantity(client, oid)
+            print(f"\n=== {j['name']}: laegger {len(todo)} keys op (lager foer: {before}) ===", flush=True)
+            added = 0
+            for attempt in range(6):
+                done, error = O.add_keys(client, oid, info, todo)
+                added += len(done)
+                todo[:] = [k for k in todo if k not in done]
+                if not todo:
+                    break
+                if error == 403:
+                    print("STOPPET: ingen tilladelse (403).")
+                    break
+                print(f"Eldorado afviste nogle keys ({error}). Pause {O.PAUSE_ON_ERROR // 60} min, saa proever jeg de {len(todo)} resterende.", flush=True)
+                time.sleep(O.PAUSE_ON_ERROR)
+            after = O.quantity(client, oid)
+            print(f"{j['name']}: {added} lagt op. Lager {before} -> {after}.", flush=True)
+    finally:
+        left = [k for c in chunks for k in c]
+        give_back(left)
+        if left:
+            print(f"{len(left)} key(s) blev IKKE lagt op og ligger igen oeverst i keys.txt.")
     print("\nFaerdig.")
 
 
