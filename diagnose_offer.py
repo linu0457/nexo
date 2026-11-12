@@ -63,17 +63,33 @@ def main():
 
     say("\n=== ELDORADO SELLER API (swagger) ===")
     spec = None
-    for path in ("/swagger/seller/v1/swagger.json", "/swagger/v1/swagger.json", "/swagger/seller/swagger.json",
-                 "/swagger/swagger.json", "/swagger/seller/v1.0/swagger.json", "/swagger/Seller/v1/swagger.json"):
-        try:
-            r = requests.get("https://www.eldorado.gg" + path, headers=client._headers(), timeout=20)
-            if r.status_code == 200 and r.text.lstrip().startswith("{"):
-                spec = r.json()
-                say(f"Found spec: {path}")
-                break
-            say(f"{path} -> {r.status_code}")
-        except requests.RequestException as e:
-            say(f"{path} -> {type(e).__name__}")
+    ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+          "Accept": "application/json,text/html,*/*", "Accept-Language": "en-US,en;q=0.9", "Referer": "https://www.eldorado.gg/swagger/seller/index.html"}
+    paths = ["/swagger/seller/v1/swagger.json", "/swagger/v1/swagger.json", "/swagger/seller/swagger.json",
+             "/swagger/swagger.json", "/swagger/seller/v1.0/swagger.json", "/swagger/Seller/v1/swagger.json"]
+    try:   # the swagger page itself usually names the json file
+        r = requests.get("https://www.eldorado.gg/swagger/seller/index.html", headers=ua, timeout=20)
+        say(f"swagger index page -> {r.status_code}")
+        import re
+        for m in re.findall(r"""["'](/?[\w./-]*swagger[\w./-]*\.json)["']""", r.text):
+            m = m if m.startswith("/") else "/swagger/seller/" + m
+            if m not in paths:
+                paths.insert(0, m)
+    except requests.RequestException as e:
+        say(f"swagger index page -> {type(e).__name__}")
+    for path in paths:
+        for hdr in ({**ua, **client._headers()}, ua):
+            try:
+                r = requests.get("https://www.eldorado.gg" + path, headers=hdr, timeout=20)
+                if r.status_code == 200 and r.text.lstrip().startswith("{"):
+                    spec = r.json()
+                    say(f"Found spec: {path}")
+                    break
+                say(f"{path} -> {r.status_code}")
+            except requests.RequestException as e:
+                say(f"{path} -> {type(e).__name__}")
+        if spec:
+            break
     if spec:
         for p, methods in sorted((spec.get("paths") or {}).items()):
             if "ffer" not in p:
