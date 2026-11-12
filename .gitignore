@@ -17,7 +17,7 @@ refill_log.json
 *_state.json
 keys*.txt
 ignore_orders.txt
-additional_info.txt
+additional_info*.txt
 *.log
 __pycache__/
 seen_orders.json
