@@ -4,7 +4,7 @@ title Opdater Nexo-Shop
 echo.
 echo === Henter nyeste version fra GitHub ===
 git config core.autocrlf true >nul 2>&1
-git checkout -- dashboard_3d.py start_all.py .gitignore                 >nul 2>&1
+git checkout -- .                                                       >nul 2>&1
 git pull --ff-only
 if errorlevel 1 (
   echo.
