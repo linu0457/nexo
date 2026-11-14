@@ -1,15 +1,13 @@
-"""Adds 10 keys to each of the two new Netflix offers (2 Years and Lifetime) - exactly the way offer.py does it for
-the 12-month offer, but with its own Additional info text. No auto mode: it runs once and stops.
+"""Adds 10 keys to the Netflix "2 Years" offer - exactly the way offer.py does it for the 12-month offer, but with its
+own Additional info text. No auto mode: it runs once and stops.
 
-The keys come from keys.txt (the same file as the 12-month restock): the first 10 go to the 2 Years offer and the
-next 10 to the Lifetime offer. Added keys move to keys_used.txt, like always.
+The keys come from keys.txt (the same file as the 12-month restock). Added keys move to keys_used.txt, like always.
 
-  py ligg_op_nye.py              -> add 10 keys to each offer
-  py ligg_op_nye.py --antal 5    -> add 5 to each
-  py ligg_op_nye.py --kun-se     -> only look: shows which offers it found and what it would add (changes nothing)
-Options if the offers are not found by their title:  --ar2 "2 year"   --lifetime "lifetime"
-Additional info: the texts are in this file (INFO_2AR / INFO_LIFETIME). A file additional_info_2ar.txt /
-additional_info_lifetime.txt next to the script overrides them if you make one.
+  py ligg_op_nye.py              -> add 10 keys
+  py ligg_op_nye.py --antal 5    -> add 5
+  py ligg_op_nye.py --kun-se     -> only look: shows which offer it found and what it would add (changes nothing)
+Option if the offer is not found by its title:  --ar2 "2 year"
+Additional info: the text is in this file (INFO_2AR). A file additional_info_2ar.txt next to the script overrides it.
 """
 import argparse
 import json
@@ -46,10 +44,8 @@ DO NOT change the password or email.
 DO NOT change the subscription plan.
 DO NOT create new profiles or edit existing profiles such as names.
 ONLY ALLOWED CHANGE: You may change the language setting."""
-INFO_LIFETIME = INFO_2AR   # same text for both for now; change INFO_LIFETIME here (or use additional_info_lifetime.txt)
 JOBS = [
     {"name": "2 Years", "words": "2 year", "info_file": "additional_info_2ar.txt", "info": INFO_2AR},
-    {"name": "Lifetime", "words": "lifetime", "info_file": "additional_info_lifetime.txt", "info": INFO_LIFETIME},
 ]
 STATES = ("Active", "Paused", "Draft", "PendingReview", "Inactive")
 
@@ -111,12 +107,9 @@ def main():
     ap.add_argument("--antal", type=int, default=10)
     ap.add_argument("--kun-se", action="store_true")
     ap.add_argument("--ar2", default=None)
-    ap.add_argument("--lifetime", default=None)
     a = ap.parse_args()
     if a.ar2:
         JOBS[0]["words"] = a.ar2
-    if a.lifetime:
-        JOBS[1]["words"] = a.lifetime
 
     client = EldoradoClient()
     offers = all_offers(client)
@@ -129,7 +122,7 @@ def main():
             for o, st in offers:
                 if "netflix" in title_of(o).lower():
                     print(f"   [{st}] {title_of(o)}")
-            print(f"Koer igen med fx  --{'ar2' if j is JOBS[0] else 'lifetime'} \"ord fra titlen\"")
+            print('Koer igen med fx  --ar2 "ord fra titlen"')
             return
         o, st = hits[0]
         f = HERE / j["info_file"]
