@@ -76,84 +76,159 @@ def quarantine(p, suffix):
     return dest
 
 
+def uniq(name):
+    QUAR.mkdir(exist_ok=True)
+    dest = QUAR / name
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = QUAR / f"{name}.{n}"
+    return dest
+
+
+def extra_roots():
+    """Other places on this computer where old copies of the scripts may lie (Desktop, Downloads ...)."""
+    out = []
+    for i, a in enumerate(sys.argv):
+        if a == "--mappe" and i + 1 < len(sys.argv):
+            out.append(Path(sys.argv[i + 1]))
+    home = Path.home()
+    for d in ("Desktop", "Downloads", "Documents", "OneDrive/Desktop", "OneDrive/Documents"):
+        if (home / d).is_dir():
+            out.append(home / d)
+    # the folder above this one (e.g. where you unpacked the zip)
+    if HERE.parent != HERE and HERE.parent != home and HERE.parent.parent != HERE.parent:   # not a drive root
+        out.append(HERE.parent)
+    seen, res = set(), []
+    for r in out:
+        k = str(r.resolve()).lower()
+        if k not in seen and k != str(HERE).lower():
+            seen.add(k)
+            res.append(r)
+    return res
+
+
+def ps(cmd):
+    try:
+        return subprocess.run([PS + ".exe", "-NoProfile", "-Command", cmd], capture_output=True, text=True, timeout=90).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def main():
     say("=" * 60)
     say(" RENS FILER" + ("  (kun se - der aendres intet)" if LOOK else ""))
     say("=" * 60)
     fixed, moved, warn = 0, 0, []
-    for root, dirs, files in os.walk(HERE):
-        dirs[:] = [d for d in dirs if d not in SKIP and not d.startswith(".")]
-        for fn in files:
-            p = Path(root) / fn
-            ext = p.suffix.lower()
-            rel = p.relative_to(HERE)
-            if ext in EXE_EXT and fn.lower() not in ALLOW:
-                say(f"[PROGRAMFIL] {rel}  -> " + ("ville blive flyttet til karantaene" if LOOK else "flyttet til karantaene"))
-                if not LOOK:
+    roots = [(HERE, True)] + [(r, False) for r in extra_roots()]
+    for base, home in roots:
+        say(f"\nTjekker {base} ...")
+        for root, dirs, files in os.walk(base):
+            depth = len(Path(root).relative_to(base).parts)
+            dirs[:] = [d for d in dirs if d.lower() not in SKIP and not d.startswith(".") and d.lower() not in ("appdata", "windows", "site-packages", "program files", "program files (x86)", "programdata")]
+            if not home and depth >= 4:
+                dirs[:] = []
+            for fn in files:
+                p = Path(root) / fn
+                ext = p.suffix.lower()
+                rel = p.relative_to(HERE) if home else p
+                if home and ext in EXE_EXT and fn.lower() not in ALLOW:
+                    say(f"[PROGRAMFIL] {rel}  -> " + ("ville blive flyttet til karantaene" if LOOK else "flyttet til karantaene"))
+                    if not LOOK:
+                        try:
+                            quarantine(p, ".quarantine")
+                            moved += 1
+                        except OSError as e:
+                            warn.append(f"{rel}: kunne ikke flyttes ({e})")
+                    continue
+                if ext not in (".py", ".pyw", ".bat", ".cmd", ".ps1", ".vbs"):
+                    continue
+                try:
+                    if p.stat().st_size > 3_000_000:
+                        continue
+                    text = p.read_text(encoding="utf-8", errors="ignore")
+                    raw = p.read_bytes()
+                except OSError:
+                    continue
+                why = suspicious(text)
+                if not why:
+                    continue
+                if ext in (".py", ".pyw") and BLOCK.match(text) and p.resolve() != Path(__file__).resolve():
+                    say(f"[SMITTET] {rel}: {', '.join(why)}")
+                    if LOOK:
+                        say("          -> ville fjerne den skjulte blok")
+                        continue
+                    try:
+                        uniq(p.name + ".smittet.txt").write_bytes(raw)
+                        cleaned = BLOCK.sub("", text, count=1)
+                        nl = "\r\n" if b"\r\n" in raw[:2000] else "\n"
+                        p.write_bytes(cleaned.replace("\r\n", "\n").replace("\n", nl).encode("utf-8"))
+                    except OSError as e:
+                        warn.append(f"{rel}: kunne ikke renses ({e}) - luk programmer der bruger filen og koer igen")
+                        continue
+                    again = suspicious(p.read_text(encoding="utf-8", errors="ignore"))
+                    if again:
+                        warn.append(f"{rel}: der er stadig noget mistaenkeligt ({', '.join(again)}) - se det igennem")
+                        say("          -> blok fjernet, men der er stadig noget i filen")
+                    else:
+                        say("          -> RENSET (original gemt i karantaene som .txt)")
+                        fixed += 1
+                else:
+                    warn.append(f"{rel}: {', '.join(why)}")
+
+    if os.name == "nt":
+        say("\nTjekker Temp, koerende programmer, autostart og planlagte opgaver ...")
+        tmp = Path(os.getenv("TEMP") or os.getenv("TMP") or "")
+        if tmp.is_dir():
+            for p in tmp.iterdir():
+                if TMPEXE.match(p.name):
+                    say(f"[TEMP-PROGRAM] {p.name}")
+                    if LOOK:
+                        continue
+                    subprocess.run(["taskkill", "/F", "/IM", p.name], capture_output=True)
+                    time.sleep(1)
                     try:
                         quarantine(p, ".quarantine")
                         moved += 1
+                        say("          -> stoppet og flyttet til karantaene")
                     except OSError as e:
-                        warn.append(f"{rel}: kunne ikke flyttes ({e})")
-                continue
-            if ext not in (".py", ".pyw", ".bat", ".cmd", ".ps1", ".vbs"):
-                continue
+                        warn.append(f"Temp/{p.name}: kunne ikke flyttes ({e}) - genstart computeren og koer igen")
+        # programs running right now from Temp (nothing normal runs from there)
+        out = ps("Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -match '\\\\Temp\\\\' } | ForEach-Object { '{0}|{1}|{2}' -f $_.ProcessId,$_.Name,$_.ExecutablePath }")
+        for line in out.splitlines():
+            parts = line.strip().split("|")
+            if len(parts) == 3:
+                say(f"[KOERER FRA TEMP] {parts[1]} (pid {parts[0]}): {parts[2]}")
+                if not LOOK:
+                    subprocess.run(["taskkill", "/F", "/PID", parts[0]], capture_output=True)
+                    say("          -> stoppet")
+                warn.append(f"Program koerte fra Temp: {parts[2]} - det er stoppet, men find ud af hvorfor det startede")
+        # start-up entries
+        for key in (r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", r"HKLM\Software\Microsoft\Windows\CurrentVersion\Run",
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce"):
             try:
-                text = p.read_text(encoding="utf-8", errors="ignore")
-                raw = p.read_bytes()
+                out = subprocess.run(["reg", "query", key], capture_output=True, text=True).stdout
             except OSError:
                 continue
-            why = suspicious(text)
-            if not why:
-                continue
-            if ext in (".py", ".pyw") and BLOCK.match(text) and p.name != Path(__file__).name:
-                say(f"[SMITTET] {rel}: {', '.join(why)}")
-                if LOOK:
-                    say("          -> ville fjerne den skjulte blok")
-                    continue
-                QUAR.mkdir(exist_ok=True)
-                (QUAR / (p.name + ".smittet.txt")).write_bytes(raw)
-                cleaned = BLOCK.sub("", text, count=1)
-                nl = "\r\n" if b"\r\n" in raw[:2000] else "\n"
-                p.write_bytes(cleaned.replace("\r\n", "\n").replace("\n", nl).encode("utf-8"))
-                again = suspicious(p.read_text(encoding="utf-8", errors="ignore"))
-                if again:
-                    warn.append(f"{rel}: der er stadig noget mistaenkeligt ({', '.join(again)}) - se det igennem")
-                    say("          -> blok fjernet, men der er stadig noget i filen")
-                else:
-                    say("          -> RENSET (original gemt i karantaene som .txt)")
-                    fixed += 1
-            else:
-                warn.append(f"{rel}: {', '.join(why)}")
-
-    # the hidden program the downloader leaves in Temp
-    tmp = Path(os.getenv("TEMP") or os.getenv("TMP") or "")
-    if os.name == "nt" and tmp.is_dir():
-        for p in tmp.iterdir():
-            if TMPEXE.match(p.name):
-                say(f"[TEMP-PROGRAM] {p.name}")
-                if LOOK:
-                    continue
-                subprocess.run(["taskkill", "/F", "/IM", p.name], capture_output=True)
-                time.sleep(1)
-                try:
-                    quarantine(p, ".quarantine")
-                    moved += 1
-                    say("          -> stoppet og flyttet til karantaene")
-                except OSError as e:
-                    warn.append(f"Temp/{p.name}: kunne ikke flyttes ({e}) - genstart computeren og koer igen")
-        # start-up entries that point into Temp / AppData
-        try:
-            out = subprocess.run(["reg", "query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"], capture_output=True, text=True).stdout
             for line in out.splitlines():
-                if re.search(r"\\temp\\|\\appdata\\", line, re.I) and ".exe" in line.lower():
-                    warn.append("Autostart peger paa en fil i Temp/AppData: " + line.strip())
+                if re.search(r"\\temp\\|\\appdata\\|\\programdata\\|\\users\\public\\", line, re.I) and ".exe" in line.lower():
+                    warn.append(f"Autostart ({key.split(chr(92))[0]}): {line.strip()}  <- fjern den i Task Manager > Start-up, hvis du ikke selv har sat den")
+        for d in (os.getenv("APPDATA", "") + r"\Microsoft\Windows\Start Menu\Programs\Startup", os.getenv("PROGRAMDATA", "") + r"\Microsoft\Windows\Start Menu\Programs\Startup"):
+            if d.strip(chr(92)) and Path(d).is_dir():
+                for f in Path(d).iterdir():
+                    if f.suffix.lower() in (".exe", ".bat", ".cmd", ".vbs", ".lnk", ".ps1", ".js") and f.name.lower() != "desktop.ini":
+                        warn.append(f"Start-up mappen indeholder: {f}  <- tjek at det er din egen")
+        # scheduled tasks that start something from Temp/AppData
+        try:
+            out = subprocess.run(["schtasks", "/query", "/fo", "csv", "/v"], capture_output=True, text=True).stdout
+            for line in out.splitlines():
+                if re.search(r"\\temp\\", line, re.I) or (re.search(r"\\appdata\\", line, re.I) and ".exe" in line.lower() and not re.search(r"microsoft|google|discord|onedrive|opera|adobe|zoom|spotify", line, re.I)):
+                    warn.append("Planlagt opgave der starter fra Temp/AppData: " + line.strip()[:200])
         except OSError:
             pass
         try:
             out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True).stdout
-            hits = [l.strip() for l in out.splitlines() if BADNET in l]
-            for h in hits[:5]:
+            for h in [l.strip() for l in out.splitlines() if BADNET in l][:5]:
                 warn.append("Forbindelse til den kendte server lige nu: " + h)
         except OSError:
             pass
@@ -166,8 +241,9 @@ def main():
             say("  - " + w)
     say()
     say("Gor nu:")
-    say("  1. Koer en FULD scanning med Windows Sikkerhed (eller Malwarebytes).")
-    say("  2. Skift Eldorado-noegler (client id/secret), Discord webhooks, elitekeys token og dine passwords.")
+    say("  1. Koer en FULD scanning med Windows Sikkerhed - vaelg 'Microsoft Defender Antivirus (offline scan)' - og gerne Malwarebytes.")
+    say("     Det der blev hentet kan have lavet kopier af sig selv. Kun et rigtigt antivirusprogram kan finde dem alle.")
+    say("  2. Skift Eldorado-noegler (client id/secret), Discord webhooks, elitekeys token og dine passwords (fra en ANDEN, ren enhed).")
     say("  3. Opdater (opdater.bat) saa du faar de rensede filer fra GitHub.")
 
 
