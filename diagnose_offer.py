@@ -48,7 +48,7 @@ def short(schema):
 
 def main():
     client = EldoradoClient()
-    word = sys.argv[1] if len(sys.argv) > 1 else "Netflix"
+    word = sys.argv[1] if len(sys.argv) > 1 else "netflix,12 month"
     offer_id = find_offer_id(client, word)
     say(f"Offer id: {offer_id}")
     say("\n=== YOUR OFFER (what Eldorado returns) ===")

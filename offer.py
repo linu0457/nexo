@@ -1,7 +1,7 @@
 """Adds accounts to an offer you ALREADY have on Eldorado (like "+ Add additional account").
 
 Every key in keys.txt (one per line) is added as one extra account to your existing
-offer (the one with "netflix" in the title). Login, Password and all other required
+offer (the one with "netflix" and "12 month" in the title). Login, Password and all other required
 fields are filled with "Scroll Down"  The text of additional_info.txt is used as Additional info,
 with {KEY} replaced by the key. The changes are REAL and visible on Eldorado immediately.
 
@@ -10,7 +10,7 @@ with {KEY} replaced by the key. The changes are REAL and visible on Eldorado imm
   py offer.py go       -> add ALL keys in keys.txt
   py offer.py auto     -> keep running and top up the stock by itself: it keeps the stock at
                           the target (default 100) by adding keys from keys.txt as they sell
-  Options: --from netflix   (word in the title of the offer, default netflix)
+  Options: --from "netflix,12 month"   (words in the title of the offer, all must fit; default netflix,12 month)
            --target 100  --batch 1  --every 10   (auto mode: wanted stock, smallest top-up,
                                                   seconds between checks)
 
@@ -47,6 +47,10 @@ PLACEHOLDER = "{KEY}"
 
 
 def find_offer_id(client, word):
+    """Finds YOUR offer by words in its TITLE (several words separated by comma: all must be in the title).
+    If more than one offer fits, it stops instead of picking one - so keys never land on the wrong offer."""
+    words = [w.strip().lower() for w in word.split(",") if w.strip()]
+    hits = []
     for state in ("Active", "Paused"):
         page = 1
         while True:
@@ -54,11 +58,17 @@ def find_offer_id(client, word):
                                   params={"offerState": state, "category": "Account",
                                           "pageIndex": page, "pageSize": 50}) or {}
             for o in data.get("results") or []:
-                if word.lower() in json.dumps(o).lower():
-                    return o["id"]
+                title = (o.get("offerTitle") or json.dumps(o)).lower()
+                if all(w in title for w in words) and o["id"] not in [h[0] for h in hits]:
+                    hits.append((o["id"], o.get("offerTitle")))
             if page >= (data.get("totalPages") or 1) or page >= 50:
                 break
             page += 1
+    if len(hits) == 1:
+        return hits[0][0]
+    if len(hits) > 1:
+        raise SystemExit(f"STOPPED: more than one offer fits '{word}': " + " | ".join(str(h[1]) for h in hits) +
+                         ". Use --from with more words from the title, e.g. --from \"netflix,12 month\".")
     raise SystemExit(f"No account offer containing '{word}' found.")
 
 
@@ -358,7 +368,7 @@ def gendan(client, offer_id, info, n, skip=0):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", nargs="?", default="preview", choices=["preview", "test", "go", "auto", "gendan"])
-    ap.add_argument("--from", dest="word", default="netflix")
+    ap.add_argument("--from", dest="word", default="netflix,12 month")
     ap.add_argument("--target", type=int, default=100)
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--every", type=int, default=10)
