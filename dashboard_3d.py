@@ -401,7 +401,7 @@ _odb_lock = threading.Lock()
 _odb = {"for": None, "orders": {}}
 _odb_seen = set()              # ids that were in the newest Eldorado answer
 _odb_started = {"v": False}
-BLOB_MAX, DB_KEEP = 6000, 2000
+BLOB_MAX, DB_KEEP = 6000, 50000
 
 
 def odb():
@@ -505,10 +505,85 @@ def pending_info(db, main, net_of):
             "gross": round(sum(r["price"]["amount"] for r in cur), 2), "rows": [pub(r, net_of) for r in rows[:8]]}
 
 
+_hist = {"at": 0.0, "busy": False}
+
+
+def fetch_all_orders(client, states):
+    """Every order Eldorado lets us read (50 per page, cursor paging like the reviews scan) as (state, order)."""
+    out = []
+    for state in states:
+        d = _order_page(client, state)
+        res = d.get("results") or []
+        seen = {o.get("id") for o in res}
+        out += [(state, o) for o in res if o.get("id")]
+        pages, tried, cands = 1, set(), [d.get("nextPageCursor")]
+        while pages < 200:                              # 200 pages = 10 000 orders per state
+            nxt, new = None, []
+            for cur in cands:
+                if not cur or cur in tried:
+                    continue
+                tried.add(cur)
+                try:
+                    d2 = _order_page(client, state, cur)
+                except Exception as e:
+                    print(f"Orders: stopped paging {state} after {pages} pages ({e})", flush=True)
+                    break
+                new = [o for o in (d2.get("results") or []) if o.get("id") and o["id"] not in seen]
+                if new:
+                    nxt = d2
+                    break
+            if not nxt:
+                break
+            pages += 1
+            for o in new:
+                seen.add(o["id"])
+                out.append((state, o))
+            cands = [nxt.get("previousPageCursor"), nxt.get("nextPageCursor")]
+            time.sleep(0.25)
+    return out
+
+
+def ingest_history(found, gone, order_time):
+    """Adds OLD orders to the orders page. Only adds orders that are not there yet; nothing else is touched."""
+    added = 0
+    with _odb_lock:
+        db = odb()
+        for state, o in found:
+            oid = o["id"]
+            if oid in db or oid in gone:
+                continue
+            d = o.get("orderOfferDetails") or {}
+            db[oid] = {"id": oid, "log": {}, "first": "", "time": order_time(o).astimezone(timezone.utc).isoformat(), "state": state,
+                       "item": d.get("offerTitle") or d.get("gameCategoryTitle") or "?",
+                       "quantity": o.get("purchaseQuantity") or 1, "price": money(o.get("totalPrice")),
+                       "buyer": o.get("buyerUsername") or "?", "blob": _blob(o)}
+            added += 1
+        if added:
+            odb_save()
+    return added
+
+
+def _history_job(client):
+    try:
+        from order_alerts import STATES as OSTATES, fetch_canceled_ids, load_ignored, order_time
+        gone = fetch_canceled_ids(client) | load_ignored()
+        found = fetch_all_orders(client, OSTATES)
+        n = ingest_history(found, gone, order_time)
+        print(f"Orders: read {len(found)} orders from Eldorado's history, {n} new ones added to the orders page.", flush=True)
+    except Exception as e:
+        print("Orders: history scan failed:", type(e).__name__, e, flush=True)
+    finally:
+        _hist["busy"] = False
+
+
 def refresh_orders(client):
     from order_alerts import fetch_canceled_ids, fetch_orders, load_ignored, net_of, order_time
     gone = fetch_canceled_ids(client) | load_ignored()
-    return ingest_orders(fetch_orders(client), gone, order_time, net_of)
+    out = ingest_orders(fetch_orders(client), gone, order_time, net_of)
+    if not _hist["busy"] and time.time() - _hist["at"] > 6 * 3600:    # at start and every 6 hours: fetch ALL older orders too
+        _hist["busy"], _hist["at"] = True, time.time()
+        threading.Thread(target=_history_job, args=(client,), daemon=True).start()
+    return out
 
 
 def refresh_stock(client):
@@ -1319,7 +1394,7 @@ def api_orders():
     with _odb_lock:
         rows = sorted(odb().values(), key=lambda r: r["time"], reverse=True)
         hits = [r for r in rows if keep(r)]
-        out = [pub(r, net_of) for r in hits[:150]]
+        out = [pub(r, net_of) for r in hits[:5000]]
         total = len(rows)
     return jsonify(orders=out, matched=len(hits), total=total)
 
