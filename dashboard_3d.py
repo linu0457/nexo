@@ -352,6 +352,7 @@ def prefs_of(name):
 _fails = {}
 _fails_lock = threading.Lock()
 MAX_FAILS, BLOCK_SECONDS = 5, 600
+LOGIN_LOCK = (os.getenv("LOGIN_LOCK", "0") or "0").strip() == "1"   # off: no waiting after wrong passwords (set LOGIN_LOCK=1 in .env to turn it on again)
 
 
 def _fail_key(username):
@@ -359,12 +360,16 @@ def _fail_key(username):
 
 
 def is_blocked(username):
+    if not LOGIN_LOCK:
+        return False
     with _fails_lock:
         n, until = _fails.get(_fail_key(username), (0, 0))
         return until > time.time()
 
 
 def register_fail(username):
+    if not LOGIN_LOCK:
+        return
     with _fails_lock:
         k = _fail_key(username)
         n, until = _fails.get(k, (0, 0))
