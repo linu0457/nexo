@@ -7,7 +7,7 @@ The keys come from keys.txt (the same file as the 12-month restock). Added keys 
   py ligg_op_nye.py --antal 5    -> add 5
   py ligg_op_nye.py --kun-se     -> only look: shows which offer it found and what it would add (changes nothing)
 Option if the offer is not found by its title:  --ar2 "2 year"
-Additional info: the text is in this file (INFO_2AR). A file additional_info_2ar.txt next to the script overrides it.
+Additional info: the text is in info_2ar.txt (the 2 Years auto refill uses the same file).
 """
 import argparse
 import json
@@ -20,33 +20,9 @@ import offer as O
 from eldorado_client import EldoradoClient
 
 HERE = Path(__file__).resolve().parent
-INFO_2AR = """🔴Your Key
-
-{KEY}
-
-If you leave a good review we will give you 3 Years instead of 2
-
-🔵Netflix Key Tutorial
-
-1: Go to https://elitekeys.site/s/nexoshop
-2: Click the "Account Button"
-3: Create an Account using your email and a password of your choice.
-4: Go to the "Redeem" page and enter your key.
-5: Go to the "Inventory"
-6: Select your preferred device.
-7: Press the link for your device
-8: If the account stops working or it says payment issues press the get "Different Acc"
-9: Just pick a profile, it doesn't matter. If all profiles are locked press get "Different Acc"
-10: If the website won't load, use a VPN set to Switzerland (only for the website, not for Netflix). We are working on a fix.
-
-🔵Netflix Account Rules
-
-DO NOT change the password or email.
-DO NOT change the subscription plan.
-DO NOT create new profiles or edit existing profiles such as names.
-ONLY ALLOWED CHANGE: You may change the language setting."""
+INFO_2AR = None        # the text lives in info_2ar.txt (also used by the 2 Years auto refill)
 JOBS = [
-    {"name": "2 Years", "words": "2 year", "info_file": "additional_info_2ar.txt", "info": INFO_2AR},
+    {"name": "2 Years", "words": "2 year", "info_file": "info_2ar.txt", "info": INFO_2AR},
 ]
 STATES = ("Active", "Paused", "Draft", "PendingReview", "Inactive")
 
@@ -151,7 +127,10 @@ def main():
         print("\nIngen keys i keys.txt.")
         return
 
-    reserve([k for c in chunks for k in c])   # out of keys.txt now; whatever is not added goes back
+    with O.keys_lock():   # the auto refills use keys.txt too - only one at a time takes keys
+        keys = read_all_keys()
+        chunks = [keys[i * n:(i + 1) * n] for i in range(len(plan))]
+        reserve([k for c in chunks for k in c])   # out of keys.txt now; whatever is not added goes back
     try:
         for (j, o, st, info), todo in zip(plan, chunks):
             if not todo:

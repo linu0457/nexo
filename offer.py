@@ -229,6 +229,37 @@ def notify(title, lines, color):
         print("Discord error:", type(e).__name__)
 
 
+LOCK_FILE = Path("keys.lock")
+
+
+class keys_lock:
+    """Only one program at a time may take keys from keys.txt (12 Months and 2 Years share the same file),
+    so they can never add the same key twice. A lock left behind by a crash is ignored after 5 minutes."""
+
+    def __enter__(self):
+        t0 = time.time()
+        while True:
+            try:
+                os.close(os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - LOCK_FILE.stat().st_mtime > 300:
+                        LOCK_FILE.unlink()
+                        continue
+                except OSError:
+                    pass
+                if time.time() - t0 > 600:
+                    raise SystemExit("keys.txt has been locked by another program for more than 10 minutes.")
+                time.sleep(0.5)
+
+    def __exit__(self, *a):
+        try:
+            LOCK_FILE.unlink()
+        except OSError:
+            pass
+
+
 def only_one_copy(port=47234):
     global _LOCK
     _LOCK = socket.socket()
@@ -242,9 +273,9 @@ def only_one_copy(port=47234):
 _LOCK = None
 
 
-def auto(client, offer_id, info, target, batch, every, offer_title="?"):
+def auto(client, offer_id, info, target, batch, every, offer_title="?", port=47234):
     """Tops the stock up to the target, in steps of `batch` keys."""
-    only_one_copy()
+    only_one_copy(port)
     print(f"Auto mode: keeping the stock at {target}. When it is {batch} or more below, "
           f"I add keys from keys.txt. Checking every {every} seconds. Stop with Ctrl+C.")
     warned = False
@@ -258,59 +289,66 @@ def auto(client, offer_id, info, target, batch, every, offer_title="?"):
             else:
                 missing = target - stock
                 wanted = (missing // batch) * batch if missing >= batch else 0
-                if wanted > 0:
-                    keys = read_keys()
-                    take = min(wanted, (len(keys) // batch) * batch)
-                    if take == 0:
-                        if not warned:
-                            print(f"Stock is {stock} but keys.txt has fewer than {batch} keys. "
-                                  "Add more keys to keys.txt, I will pick them up.")
-                            notify("Out of Keys", [
-                                ("Item:", offer_title),
-                                ("Stock:", f"{stock} / {target}"),
-                                ("Keys left:", len(keys)),
-                                ("**Add more keys to keys.txt, the refill continues by itself.**", None),
-                            ], RED)
-                            warned = True
+                lock = keys_lock() if wanted > 0 else None
+                if lock:
+                    lock.__enter__()
+                try:
+                    if wanted > 0:
+                        keys = read_keys()
+                        take = min(wanted, (len(keys) // batch) * batch)
+                        if take == 0:
+                            if not warned:
+                                print(f"Stock is {stock} but keys.txt has fewer than {batch} keys. "
+                                      "Add more keys to keys.txt, I will pick them up.")
+                                notify("Out of Keys", [
+                                    ("Item:", offer_title),
+                                    ("Stock:", f"{stock} / {target}"),
+                                    ("Keys left:", len(keys)),
+                                    ("**Add more keys to keys.txt, the refill continues by itself.**", None),
+                                ], RED)
+                                warned = True
+                        else:
+                            warned = False
+                            print(f"Stock is {stock} (target {target}). Adding {take} key(s).")
+                            done, error = add_keys(client, offer_id, info, keys[:take])
+                            if done:
+                                time.sleep(3)
+                                after = quantity(client, offer_id)
+                                left = len(read_keys())
+                                if after is not None and after < stock + len(done):
+                                    notify("Auto Refill STOPPED", [
+                                        ("Item:", offer_title),
+                                        ("Added:", f"{len(done)} keys"),
+                                        (f"Stock did not go up ({stock} -> {after}). Eldorado does not raise the "
+                                         "stock by itself, so the refill was stopped.", None),
+                                        ("Keys left:", left),
+                                    ], RED)
+                                    raise SystemExit(
+                                        f"STOPPED: I added {len(done)} key(s), but the stock went {stock} -> {after}. "
+                                        "Eldorado does not raise the stock number by itself, so I stop here "
+                                        "instead of adding more keys by mistake. Send me this message.")
+                                log_refill(len(done), stock, after, left)
+                                notify("Stock Refilled", [
+                                    ("Item:", offer_title),
+                                    ("Added:", f"{len(done)} key{'s' if len(done) != 1 else ''}"),
+                                    ("Stock:", f"{stock} → {after if after is not None else '?'}"),
+                                    ("", None),
+                                    ("**Keys left in keys.txt:**", left),
+                                ], RED if left == 0 else AMBER if left <= LOW_KEYS else GREEN)
+                            if error == 403:
+                                notify("Auto Refill STOPPED", [("No permission to add accounts (403).", None)], RED)
+                                raise SystemExit("STOPPED: no permission to add accounts.")
+                            if error is not None:
+                                # Eldorado only lets a limited number of keys through at a time: wait 5 minutes,
+                                # then the next round adds the keys that were not added (they are still in keys.txt)
+                                print(f"Eldorado refused some keys ({error}). Pausing {PAUSE_ON_ERROR // 60} minutes, "
+                                      f"then I add the remaining keys.", flush=True)
+                                pause_after_error = True
                     else:
                         warned = False
-                        print(f"Stock is {stock} (target {target}). Adding {take} key(s).")
-                        done, error = add_keys(client, offer_id, info, keys[:take])
-                        if done:
-                            time.sleep(3)
-                            after = quantity(client, offer_id)
-                            left = len(read_keys())
-                            if after is not None and after < stock + len(done):
-                                notify("Auto Refill STOPPED", [
-                                    ("Item:", offer_title),
-                                    ("Added:", f"{len(done)} keys"),
-                                    (f"Stock did not go up ({stock} -> {after}). Eldorado does not raise the "
-                                     "stock by itself, so the refill was stopped.", None),
-                                    ("Keys left:", left),
-                                ], RED)
-                                raise SystemExit(
-                                    f"STOPPED: I added {len(done)} key(s), but the stock went {stock} -> {after}. "
-                                    "Eldorado does not raise the stock number by itself, so I stop here "
-                                    "instead of adding more keys by mistake. Send me this message.")
-                            log_refill(len(done), stock, after, left)
-                            notify("Stock Refilled", [
-                                ("Item:", offer_title),
-                                ("Added:", f"{len(done)} key{'s' if len(done) != 1 else ''}"),
-                                ("Stock:", f"{stock} → {after if after is not None else '?'}"),
-                                ("", None),
-                                ("**Keys left in keys.txt:**", left),
-                            ], RED if left == 0 else AMBER if left <= LOW_KEYS else GREEN)
-                        if error == 403:
-                            notify("Auto Refill STOPPED", [("No permission to add accounts (403).", None)], RED)
-                            raise SystemExit("STOPPED: no permission to add accounts.")
-                        if error is not None:
-                            # Eldorado only lets a limited number of keys through at a time: wait 5 minutes,
-                            # then the next round adds the keys that were not added (they are still in keys.txt)
-                            print(f"Eldorado refused some keys ({error}). Pausing {PAUSE_ON_ERROR // 60} minutes, "
-                                  f"then I add the remaining keys.", flush=True)
-                            pause_after_error = True
-                else:
-                    warned = False
+                finally:
+                    if lock:
+                        lock.__exit__()
             delay = every
             if pause_after_error:
                 delay = PAUSE_ON_ERROR
@@ -369,6 +407,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", nargs="?", default="preview", choices=["preview", "test", "go", "auto", "gendan"])
     ap.add_argument("--from", dest="word", default="netflix,12 month")
+    ap.add_argument("--info", default="additional_info.txt", help="file with the Additional info text ({KEY} = the key)")
+    ap.add_argument("--port", type=int, default=47234, help="auto: lock port, one per offer")
     ap.add_argument("--target", type=int, default=100)
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--every", type=int, default=10)
@@ -376,6 +416,8 @@ def main():
     ap.add_argument("--spring", type=int, default=0, help="gendan: skip this many of the very latest used keys first")
     a = ap.parse_args()
 
+    global INFO_FILE
+    INFO_FILE = Path(a.info)
     client = EldoradoClient()
     offer_id = find_offer_id(client, a.word)
     offer = (client.request("GET", f"/api/flexibleOffers/{offer_id}/private") or {}).get("offer") or {}
@@ -390,7 +432,7 @@ def main():
         print(f"Stock now: {offer.get('quantity')}")
         print(f"Additional info: {check_info_length(info)} of {MAX_INFO} characters (with a key in it)")
         try:
-            auto(client, offer_id, info, a.target, a.batch, a.every, offer.get("offerTitle") or "?")
+            auto(client, offer_id, info, a.target, a.batch, a.every, offer.get("offerTitle") or "?", a.port)
         except KeyboardInterrupt:
             print("\nStopped.")
         return
