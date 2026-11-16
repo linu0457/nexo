@@ -1,9 +1,9 @@
-"""Adds 10 keys to the Netflix "2 Years" offer - exactly the way offer.py does it for the 12-month offer, but with its
+"""Adds 50 keys to the Netflix "2 Years" offer - exactly the way offer.py does it for the 12-month offer, but with its
 own Additional info text. No auto mode: it runs once and stops.
 
 The keys come from keys.txt (the same file as the 12-month restock). Added keys move to keys_used.txt, like always.
 
-  py ligg_op_nye.py              -> add 10 keys
+  py ligg_op_nye.py              -> add 50 keys
   py ligg_op_nye.py --antal 5    -> add 5
   py ligg_op_nye.py --kun-se     -> only look: shows which offer it found and what it would add (changes nothing)
 Option if the offer is not found by its title:  --ar2 "2 year"
@@ -104,7 +104,7 @@ def give_back(keys):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--antal", type=int, default=10)
+    ap.add_argument("--antal", type=int, default=50)
     ap.add_argument("--kun-se", action="store_true")
     ap.add_argument("--ar2", default=None)
     a = ap.parse_args()
