@@ -24,6 +24,7 @@ INFO_2AR = """🔴Your Key
 
 {KEY}
 
+If you leave a good review we will give you 3 Years instead of 2
 
 🔵Netflix Key Tutorial
 
