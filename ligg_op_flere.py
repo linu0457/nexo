@@ -13,6 +13,7 @@ Additional info: offers with "1 year" in the title use info_1ar.txt if you have 
 additional_info.txt (the same text as always, {KEY} = the key).
 """
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -23,6 +24,8 @@ from ligg_op_nye import all_offers, give_back, read_all_keys, reserve, title_of
 HERE = Path(__file__).resolve().parent
 # the ORIGINAL 12 Months offer (it has its own auto refill) - never touched by this file
 IGNORE_IDS = {"bf70b7ff-a242-4073-ad3a-08df2f3fdeae"}
+# offers whose title has no "netflix" or a different spelling - always included
+EXTRA_TITLES = ("netflix 12 months subscription", "premium plan 4k | 12 months")
 
 
 def info_for(title):
@@ -36,31 +39,29 @@ def info_for(title):
     return f.read_text(encoding="utf-8").rstrip(), "additional_info.txt"
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--antal", type=int, default=25)
-    ap.add_argument("--kun-se", action="store_true")
-    ap.add_argument("--ord", default="12 month,1 year")
-    ap.add_argument("--ignorer", default="", help="more offer ids to skip, separated by comma")
-    a = ap.parse_args()
-    words = [w.strip().lower() for w in a.ord.split(",") if w.strip()]
-    skip = IGNORE_IDS | {x.strip() for x in a.ignorer.split(",") if x.strip()}
+def norm(title):
+    return title.lower().replace("-", " ")
 
-    client = EldoradoClient()
-    offers = [(o, st) for o, st in all_offers(client)
-              if o.get("id") not in skip and "netflix" in title_of(o).lower() and any(w in title_of(o).lower() for w in words)]
-    if not offers:
-        print("Fandt ingen Netflix-tilbud med", " eller ".join(words), "i titlen.")
-        return
+
+def is_target(o, words, skip):
+    if o.get("id") in skip:
+        return False
+    t = norm(title_of(o))
+    if any(x in t for x in EXTRA_TITLES):
+        return True
+    return ("netflix" in json.dumps(o).lower() or "netflix" in t) and any(w in t for w in words)
+
+
+def run(client, offers, n, kun_se):
+    """Adds n keys to each offer. Returns True when it really added (or tried to add) keys."""
     plan = []
     for o, st in offers:
         info, src = info_for(title_of(o))
         if O.PLACEHOLDER not in info:
             print(f"{src} mangler {O.PLACEHOLDER} der hvor keyen skal staa.")
-            return
+            return False
         plan.append([o, st, info, src])
 
-    n = a.antal
     keys = read_all_keys()
     chunks = [keys[i * n:(i + 1) * n] for i in range(len(plan))]
     print(f"\nPLAN  ({len(plan)} tilbud, {n} keys til hver, keys.txt har {len(keys)} keys)")
@@ -70,12 +71,12 @@ def main():
     short = len(plan) * n - len(keys)
     if short > 0:
         print(f"\nBEMAERK: der mangler {short} keys i keys.txt til at fylde alle op. De sidste faar faerre eller ingen.")
-    if a.kun_se:
+    if kun_se:
         print("\nKUN SE - der er ikke aendret noget.")
-        return
+        return False
     if not keys:
         print("\nIngen keys i keys.txt.")
-        return
+        return False
 
     with O.keys_lock():   # the auto refills use keys.txt too - only one at a time takes keys
         keys = read_all_keys()
@@ -112,6 +113,25 @@ def main():
         if left:
             print(f"\n{len(left)} key(s) blev IKKE lagt op og ligger igen oeverst i keys.txt.")
     print(f"\nFaerdig. {total} keys lagt op i alt.")
+    return total > 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--antal", type=int, default=25)
+    ap.add_argument("--kun-se", action="store_true")
+    ap.add_argument("--ord", default="12 month,1 year")
+    ap.add_argument("--ignorer", default="", help="more offer ids to skip, separated by comma")
+    a = ap.parse_args()
+    words = [w.strip().lower() for w in a.ord.split(",") if w.strip()]
+    skip = IGNORE_IDS | {x.strip() for x in a.ignorer.split(",") if x.strip()}
+
+    client = EldoradoClient()
+    offers = [(o, st) for o, st in all_offers(client) if is_target(o, words, skip)]
+    if not offers:
+        print("Fandt ingen tilbud med", " eller ".join(words), "i titlen.")
+        return
+    run(client, offers, a.antal, a.kun_se)
 
 
 if __name__ == "__main__":
