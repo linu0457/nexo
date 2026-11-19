@@ -7,6 +7,8 @@ Added keys move to keys_used.txt. Keys that could not be added go back into keys
   py ligg_op_flere.py --kun-se      -> only look: lists the offers it found and what it would do (changes nothing)
   py ligg_op_flere.py --ord "12 month,1 year"   -> which words in the title to look for
 
+The original 12 Months offer (the one with auto refill) is skipped. Skip more with --ignorer id1,id2
+
 Additional info: offers with "1 year" in the title use info_1ar.txt if you have made that file, all others use
 additional_info.txt (the same text as always, {KEY} = the key).
 """
@@ -19,6 +21,8 @@ from eldorado_client import EldoradoClient
 from ligg_op_nye import all_offers, give_back, read_all_keys, reserve, title_of
 
 HERE = Path(__file__).resolve().parent
+# the ORIGINAL 12 Months offer (it has its own auto refill) - never touched by this file
+IGNORE_IDS = {"bf70b7ff-a242-4073-ad3a-08df2f3fdeae"}
 
 
 def info_for(title):
@@ -37,12 +41,14 @@ def main():
     ap.add_argument("--antal", type=int, default=25)
     ap.add_argument("--kun-se", action="store_true")
     ap.add_argument("--ord", default="12 month,1 year")
+    ap.add_argument("--ignorer", default="", help="more offer ids to skip, separated by comma")
     a = ap.parse_args()
     words = [w.strip().lower() for w in a.ord.split(",") if w.strip()]
+    skip = IGNORE_IDS | {x.strip() for x in a.ignorer.split(",") if x.strip()}
 
     client = EldoradoClient()
     offers = [(o, st) for o, st in all_offers(client)
-              if "netflix" in title_of(o).lower() and any(w in title_of(o).lower() for w in words)]
+              if o.get("id") not in skip and "netflix" in title_of(o).lower() and any(w in title_of(o).lower() for w in words)]
     if not offers:
         print("Fandt ingen Netflix-tilbud med", " eller ".join(words), "i titlen.")
         return
