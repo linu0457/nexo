@@ -407,6 +407,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", nargs="?", default="preview", choices=["preview", "test", "go", "auto", "gendan"])
     ap.add_argument("--from", dest="word", default="netflix,12 month")
+    ap.add_argument("--id", default="", help="the exact offer id (use it when several offers have the same words in the title)")
     ap.add_argument("--info", default="additional_info.txt", help="file with the Additional info text ({KEY} = the key)")
     ap.add_argument("--port", type=int, default=47234, help="auto: lock port, one per offer")
     ap.add_argument("--target", type=int, default=100)
@@ -419,7 +420,7 @@ def main():
     global INFO_FILE
     INFO_FILE = Path(a.info)
     client = EldoradoClient()
-    offer_id = find_offer_id(client, a.word)
+    offer_id = a.id.strip() or find_offer_id(client, a.word)
     offer = (client.request("GET", f"/api/flexibleOffers/{offer_id}/private") or {}).get("offer") or {}
     info = read_info()
 

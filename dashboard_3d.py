@@ -2216,7 +2216,8 @@ import subprocess
 
 HERE = Path(__file__).resolve().parent
 PROGRAM_LIST = [("orders", "order_alerts.py", []), ("reviews", "review_alerts.py", []), ("stock", "stock_board.py", []),
-                ("stats", "stats_board.py", []), ("offer", "offer.py", ["auto"]),
+                ("stats", "stats_board.py", []), ("offer", "offer.py", ["auto", "--id", "bf70b7ff-a242-4073-ad3a-08df2f3fdeae"]),   # the ORIGINAL 12 Months offer (there are more with the same words now)
+               
                 ("offer2", "offer.py", ["auto", "--from", "netflix,2 year", "--info", "info_2ar.txt", "--port", "47235"])]
 _progs = {}                       # name -> _Prog (only when the dashboard manages the programs)
 _prog_stop = threading.Event()
