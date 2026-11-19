@@ -2,7 +2,7 @@
 
 Every key in keys.txt (one per line) is added as one extra account to your existing
 offer (the one with "netflix" and "12 month" in the title). Login, Password and all other required
-fields are filled with "Scroll Down"  The text of additional_info.txt is used as Additional info,
+fields are filled with "Account 1"  The text of additional_info.txt is used as Additional info,
 with {KEY} replaced by the key. The changes are REAL and visible on Eldorado immediately.
 
   py offer.py          -> preview only (nothing is changed)
@@ -112,7 +112,7 @@ def read_info():
 
 
 PAUSE_ON_ERROR = 300   # seconds to wait when Eldorado refuses keys (limit per round)
-FILL = "Scroll Down"   # shown in the username/password/email/MFA fields (the real key is in Additional info)
+FILL = "Account 1"   # shown in the username/password/email/MFA fields (the real key is in Additional info)
 
 
 MAX_INFO = 1000   # Eldorado: Additional info may be at most 1000 characters
