@@ -1,6 +1,15 @@
 @echo off
 cd /d "%~dp0"
 title Restock
+if exist auto_restock.json (
+  echo.
+  echo  Auto restock styres nu fra dashboardet ^(siden "Auto restock"^).
+  echo  Der vaelger du hvilke offers der fyldes op, og hvad de maks skal op til.
+  echo  Denne fil starter derfor ikke noget. Aabn dashboardet og brug siden.
+  echo.
+  pause
+  exit /b
+)
 netstat -an | findstr "127.0.0.1:47234" | findstr "LISTENING" >nul
 if %errorlevel%==0 (
   echo.

@@ -37,3 +37,6 @@ keys.lock
 ligg_op_disse.done
 opret_log.txt
 opret_log.json
+fyld_log.json
+auto_restock.json
+auto_restock.tmp

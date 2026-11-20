@@ -81,7 +81,7 @@ CURRENCIES = ("DKK", "USD", "EUR")
 SOUNDS = ("ding", "bell", "pop", "chime", "none")
 NOTIFY_KINDS = ("warroom", "orders", "reviews", "keys")
 OVERVIEW_TILES = ("today", "month", "all", "avg", "stock", "profit", "taxpot", "lastorder", "revrate", "pending", "reviews", "keys", "latest", "chart", "stockp", "status", "others", "stockval", "forecast")
-NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys", "warroom", "mindmap", "profit", "create", "fill", "programs", "server", "users", "settings", "news")
+NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys", "warroom", "mindmap", "profit", "create", "fill", "restock", "programs", "server", "users", "settings", "news")
 BACKGROUNDS = ("", "dots", "grid", "waves", "aurora", "diagonal")
 DEFAULT_PREFS = {"lang": "", "accent": "", "currency": "", "sound": "ding", "gross": None, "tax": 37,
                  "emoji": "", "color": "", "bg": "", "hide": [], "menu": [], "pins": [], "payout": 5, "ovorder": [],
@@ -1700,6 +1700,173 @@ def api_fyld_stop():
     return jsonify(ok=True)
 
 
+# ---------- auto restock: which offers are topped up by themselves, and up to what (admin only) ----------
+# The list lives in auto_restock.json (restock_config.py). The offer.py programs read their max stock from it every round.
+_rs = {"lock": threading.Lock(), "mem": None, "leg": {}}      # mem: the saved list in demo mode; leg: which offers the two old programs look after
+
+
+def _rs_eng():
+    import restock_config
+    return restock_config
+
+
+def _rs_saved():
+    return _rs["mem"] if DEMO else _rs_eng().load()
+
+
+def _rs_prog_id(p, offer2_id):
+    """The offer id an offer.py program looks after (None when it is not one)."""
+    if p.script != "offer.py":
+        return None
+    a = p.args
+    if "--id" in a and a.index("--id") + 1 < len(a):
+        return a[a.index("--id") + 1]
+    return offer2_id if p.name == "offer2" else None
+
+
+def _rs_status():
+    """offer id -> how its restock program is doing."""
+    out = {}
+    for p in list(_progs.values()):
+        oid = _rs_prog_id(p, _rs["leg"].get("offer2"))
+        if not oid:
+            continue
+        pr = p.proc
+        running = (p.fake and p.state == "running") or (pr is not None and pr.poll() is None)
+        out[oid] = {"name": p.name, "state": "stopping" if p.gone and running else "running" if running else p.state}
+    return out
+
+
+def _rs_old(offers):
+    """The list that is in force now: the saved one, or what the two old programs do."""
+    rc = _rs_eng()
+    _rs["leg"] = rc.legacy_ids(offers)
+    titles = {o["id"]: o.get("title", "") for o in offers}
+    saved = _rs_saved()
+    if saved is not None:
+        return [dict(e, title=titles.get(e["id"]) or e.get("title", "")) for e in saved], True
+    ports = rc.legacy_ports(offers)
+    return [dict(e, port=ports.get(e["id"]), title=titles.get(e["id"], "")) for e in rc.legacy_entries(offers)], False
+
+
+@app.route("/api/restock/offers")
+def api_restock_offers():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    if DEMO:
+        _demo_programs()
+    rc, ceng = _rs_eng(), _opret_eng()
+    try:
+        offers = _fyld_eng().list_offers(_opret_client("read"))
+    except requests.RequestException as e:
+        return jsonify(error=ceng.err_text(e)), 502
+    old, saved = _rs_old(offers)
+    entries = [{"id": e["id"], "target": e.get("target"), "info": e.get("info", "auto"), "title": e.get("title", "")} for e in old]
+    return jsonify(offers=offers, entries=entries, saved=saved, keys=_opret_keys().left(), info=rc.info_status(_opret_loader()),
+                   programs=_rs_status(), managed=bool(_prog_managed) or DEMO, demo=DEMO)
+
+
+@app.route("/api/restock/state")
+def api_restock_state():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    if DEMO:
+        _demo_programs()
+    return jsonify(programs=_rs_status(), managed=bool(_prog_managed) or DEMO)
+
+
+@app.route("/api/restock/preview", methods=["POST"])
+def api_restock_preview():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    rc = _rs_eng()
+    try:
+        entries = rc.clean_entries((request.get_json(silent=True) or {}).get("entries"))
+        offers = _fyld_eng().list_offers(_opret_client("read"))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    except requests.RequestException as e:
+        return jsonify(error=_opret_eng().err_text(e)), 502
+    old, _saved = _rs_old(offers)
+    return jsonify(rc.make_plan(_opret_client("read"), entries, _opret_keys().left(), _opret_loader(), old))
+
+
+def _rs_apply(entries, infos):
+    """Starts, updates or stops the offer.py programs so they match the saved list."""
+    rc = _rs_eng()
+    want = {e["id"]: e for e in entries}
+    if DEMO:
+        for name in [n for n in _progs if n.startswith("restock-") or n in ("offer", "offer2")]:
+            _progs.pop(name, None)
+        for e in entries:
+            p = _Prog(rc.program_name(e["id"]), "offer.py", rc.program_args(e, infos[e["id"]]))
+            p.fake, p.state, p.started = True, "running", time.time()
+            _progs[p.name] = p
+        return
+    alive = {}
+    for p in list(_progs.values()):
+        oid = _rs_prog_id(p, _rs["leg"].get("offer2"))
+        if oid and not p.ended and oid not in alive:
+            alive[oid] = p
+    for oid, p in alive.items():
+        if oid in want:
+            p.gone = False
+            if p.info_file != infos[oid]:                  # another Additional info text: the program switches by itself next round
+                p.args, p.info_file = rc.program_args(want[oid], infos[oid]), infos[oid]      # (a later restart then starts with it)
+        else:
+            p.gone = True                                   # it stops by itself between two rounds and is not started again
+            p.wake.set()
+    if not _prog_managed:
+        return
+    for oid, e in want.items():
+        if oid in alive:
+            continue
+        p = _Prog(rc.program_name(oid), "offer.py", rc.program_args(e, infos[oid]))
+        p.info_file = infos[oid]
+        _progs[p.name] = p
+        threading.Thread(target=_prog_run, args=(p,), daemon=True).start()
+
+
+@app.route("/api/restock/save", methods=["POST"])
+def api_restock_save():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    rc = _rs_eng()
+    j = request.get_json(silent=True) or {}
+    try:
+        entries = rc.clean_entries(j.get("entries"))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    if j.get("confirm") is not True:
+        return jsonify(error="bad request"), 400
+    if DEMO:
+        _demo_programs()
+    with _rs["lock"]:
+        try:
+            offers = _fyld_eng().list_offers(_opret_client("job"))
+        except requests.RequestException as e:
+            return jsonify(error=_opret_eng().err_text(e)), 502
+        old, _saved = _rs_old(offers)
+        plan = rc.make_plan(_opret_client("job"), entries, _opret_keys().left(), _opret_loader(), old)
+        if plan["ok"] != len(plan["items"]):
+            return jsonify(error="Some of the offers cannot be saved. Nothing was changed.", plan=plan), 400
+        titles = {i["id"]: i["title"] for i in plan["items"]}
+        infos = {i["id"]: i["info_file"] for i in plan["items"]}
+        new = [dict(e, info_file=infos[e["id"]]) for e in rc.assign(entries, titles, old, rc.legacy_ports(offers))]
+        if DEMO:
+            _rs["mem"] = new
+        else:
+            rc.save(new)
+        _rs_apply(new, infos)
+    print(f"{current_user()['name']} saved the Auto restock list: {len(new)} offer(s)" +
+          (": " + ", ".join(f"{e['title'][:30]} -> {e['target']}" for e in new) if new else " (auto restock off)") + ".", flush=True)
+    return jsonify(ok=True, programs=_rs_status(), managed=bool(_prog_managed) or DEMO)
+
+
 # ---------- orders, buyers, days ----------
 
 @app.route("/api/orders")
@@ -2544,9 +2711,9 @@ import subprocess
 
 HERE = Path(__file__).resolve().parent
 PROGRAM_LIST = [("orders", "order_alerts.py", []), ("reviews", "review_alerts.py", []), ("stock", "stock_board.py", []),
-                ("stats", "stats_board.py", []), ("offer", "offer.py", ["auto", "--id", "bf70b7ff-a242-4073-ad3a-08df2f3fdeae"]),   # the ORIGINAL 12 Months offer (there are more with the same words now)
+                ("stats", "stats_board.py", []), ("offer", "offer.py", ["auto", "--id", "bf70b7ff-a242-4073-ad3a-08df2f3fdeae", "--managed"]),   # the ORIGINAL 12 Months offer (there are more with the same words now)
                
-                ("offer2", "offer.py", ["auto", "--from", "netflix,2 year", "--info", "info_2ar.txt", "--port", "47235"])]
+                ("offer2", "offer.py", ["auto", "--from", "netflix,2 year", "--info", "info_2ar.txt", "--port", "47235", "--managed"])]
 _progs = {}                       # name -> _Prog (only when the dashboard manages the programs)
 _prog_stop = threading.Event()
 _prog_lock = threading.Lock()
@@ -2569,6 +2736,9 @@ class _Prog:
         self.fake = False
         self.cmd = None               # full command for non-python programs (Caddy)
         self.cwd = None
+        self.gone = False             # taken off the Auto restock list: let it finish, do not start it again
+        self.ended = False            # its thread has finished
+        self.info_file = ""           # offer.py programs: the Additional info file it uses
 
 
 def _prog_add(p, text):
@@ -2599,7 +2769,18 @@ def _prog_run(p):
         return
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     fast = 0
-    while not _prog_stop.is_set():
+    try:
+        _prog_loop(p, path, env, fast)
+    finally:
+        p.ended = True
+        if p.gone:
+            p.state = "stopped"
+            if _progs.get(p.name) is p:
+                _progs.pop(p.name, None)
+
+
+def _prog_loop(p, path, env, fast):
+    while not _prog_stop.is_set() and not p.gone:
         began = time.time()
         try:
             proc = subprocess.Popen(p.cmd or [sys.executable, "-u", str(path), *p.args], cwd=p.cwd or str(HERE), env=env, stdout=subprocess.PIPE,
@@ -2617,7 +2798,7 @@ def _prog_run(p):
             print(f"[{p.name:<8}] {text}", flush=True)
         code = proc.wait()
         p.code, p.proc = code, None
-        if _prog_stop.is_set():
+        if _prog_stop.is_set() or p.gone:
             break
         manual, p.restart_now = p.restart_now, False
         fast = 0 if manual else (fast + 1 if time.time() - began < 30 else 0)
@@ -2629,14 +2810,39 @@ def _prog_run(p):
         p.wake.clear()
 
 
+def _program_specs():
+    """The programs to start: (name, script, args, info_file). Without a saved Auto restock list: the two old restock programs.
+    With a list: one restock program per offer on it."""
+    base = [(n, sc, a, "") for n, sc, a in PROGRAM_LIST if n not in ("offer", "offer2")]
+    legacy = [(n, sc, a, "additional_info.txt" if n == "offer" else "info_2ar.txt") for n, sc, a in PROGRAM_LIST if n in ("offer", "offer2")]
+    saved = None if DEMO else _rs_eng().load()
+    if saved is None:
+        return base + legacy
+    rc = _rs_eng()
+    out = []
+    for e in saved:
+        try:
+            ent = rc.clean_entries([{"id": e.get("id"), "target": e.get("target"), "info": e.get("info", "auto")}])[0]
+        except ValueError:
+            continue                                   # a broken line in the file is skipped, never guessed
+        port = e.get("port") if isinstance(e.get("port"), int) else None
+        if port is None:
+            continue
+        saved_file = e.get("info_file") if isinstance(e.get("info_file"), str) and re.match(r"^[A-Za-z0-9_.-]{1,60}\.txt$", e.get("info_file")) else ""
+        fname = saved_file or rc.info_for(ent["info"], e.get("title") or "")[1] or "additional_info.txt"
+        out.append((rc.program_name(ent["id"]), "offer.py", rc.program_args({**ent, "port": port}, fname), fname))
+    return base + out
+
+
 def start_programs(only=None):
     """Starts the other scripts as child programs, so  py dashboard.py  is the only thing you run."""
     global _prog_managed
     _prog_managed = True
-    for name, script, args in PROGRAM_LIST:
-        if only and name not in only:
+    for name, script, args, info_file in _program_specs():
+        if only and name not in only and not (name.startswith("restock-") and "offer" in only):
             continue
         p = _progs[name] = _Prog(name, script, args)
+        p.info_file = info_file
     exe, cdir = _caddy_find()
     if exe and (not only or "https" in only):
         p = _progs["https"] = _Prog("https", exe.name, [])
@@ -2965,7 +3171,7 @@ BACKUP_KEEP = 14
 # Your data. Secrets (.env, *.key, *.pem) are deliberately NOT included, so a backup is safe to download.
 BACKUP_NAMES = ("ledger.json", "orders_db.json", "users.json", "devices.json", "prefs.json", "costs.json", "unitcosts.json",
                 "push_subs.json", "warroom.json", "mindmap.json", "refill_log.json", "history.json", "history_backfill.done",
-                "ignore_orders.txt", "additional_info.txt")
+                "ignore_orders.txt", "additional_info.txt", "auto_restock.json", "fyld_log.json", "opret_log.json")
 BACKUP_GLOBS = ("keys*.txt", "*_state.json", "spinner_photo.img")
 BACKUP_RE = re.compile(r"^backup-\d{4}-\d{2}-\d{2}_\d{6}(-manual|-safety)?\.zip$")
 _backup_lock = threading.Lock()
@@ -4413,6 +4619,15 @@ mark.n{background:var(--accentbg);color:var(--accent);border-radius:4px;padding:
 .crwarn.bad{background:var(--redbg);color:var(--red);border-color:var(--red)}
 .crbad{color:var(--red)!important}
 @media(max-width:820px){.crrule{grid-template-columns:1fr}.crlist{max-height:320px}.crrow{gap:10px;padding:9px 10px}.crp{grid-template-columns:1fr}.crp>div:first-child{display:flex;gap:6px;flex-wrap:wrap}}
+.rsrow{flex-wrap:wrap;cursor:default}
+.rsmain{display:flex;align-items:center;gap:12px;flex:1;min-width:0;cursor:pointer}
+.rsst:empty{display:none}
+.rsctl{flex-basis:100%;display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 14px;padding:2px 0 6px 34px}
+.rsctl label{display:flex;flex-direction:column;gap:5px;font-size:12.5px;color:var(--muted)}
+.rsctl input{width:120px;font-size:14px}.rsctl select{min-width:210px;font-size:14px}
+.rshint{flex:1 1 200px;min-width:0;align-self:center;overflow-wrap:anywhere}
+.rshint .crwhy{margin-top:0}
+@media(max-width:820px){.rsctl{padding-left:0}.rsctl label{flex:1 1 140px}.rsctl input,.rsctl select{width:100%;min-width:0}}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
@@ -4523,6 +4738,21 @@ mark.n{background:var(--accentbg);color:var(--accent);border-radius:4px;padding:
  <div class="panel" id="fl-run" style="margin-top:14px" hidden></div>
  <div class="panel" style="margin-top:14px"><h2>Added here</h2>
   <div class="dyn" id="fl-made"><div class="empty">Nothing added yet.</div></div></div>
+</section>
+
+<section class="page" id="p-restock">
+ <div class="panel"><h2>1. Choose the offers that fill up by themselves <span id="rs-keys"></span></h2>
+  <div class="crwarn" id="rs-note" hidden></div>
+  <div class="bar2" style="margin-top:10px"><input type="search" id="rs-q" placeholder="Search offers"><button class="btn" id="rs-selall" type="button">Select all</button><button class="btn" id="rs-sel1" type="button">Select all with 1 year / 12 months</button><button class="btn" id="rs-sel2" type="button">Select all with 2 years</button><button class="btn" id="rs-selnone" type="button">Select none</button><span class="muted" id="rs-count"></span></div>
+  <div class="dyn crlist" id="rs-list"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div>
+  <div class="muted" style="font-size:12.5px;margin-top:10px">Tick an offer and type the max stock it should be topped up to. Whenever the stock of a ticked offer is below its max, a program adds keys from the key list until it is full again.</div></div>
+ <div class="panel" style="margin-top:14px"><h2>2. Same max stock for all ticked offers</h2>
+  <div class="crform"><label><span>Max stock</span><input id="rs-all" type="number" min="1" max="9999" step="1" value="100" inputmode="numeric"></label></div>
+  <div class="chips" style="margin-top:10px"><button class="chip" type="button" data-rsq="10">10</button><button class="chip" type="button" data-rsq="25">25</button><button class="chip" type="button" data-rsq="50">50</button><button class="chip" type="button" data-rsq="100">100</button><button class="chip" type="button" data-rsq="200">200</button></div>
+  <div class="row" style="margin-top:12px"><button class="btn" id="rs-apply" type="button">Set for all ticked</button></div>
+  <div class="muted" style="font-size:12.5px;margin-top:10px">You can also type a different max stock on each offer above. This only fills in the boxes, nothing is saved until you save in step 3.</div>
+  <div class="row" style="margin-top:12px"><button class="btn on" id="rs-gopreview" type="button">Preview</button></div></div>
+ <div class="panel" id="rs-prev" style="margin-top:14px" hidden></div>
 </section>
 
 <section class="page" id="p-programs"><div class="panel"><h2>Programs <span id="progsum"></span></h2>
@@ -4688,6 +4918,7 @@ mark.n{background:var(--accentbg);color:var(--accent);border-radius:4px;padding:
   <a href="#profit" data-p="profit" id="navprofit" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5c0-1 1-1.5 2.5-1.5s2.5.6 2.5 1.7c0 2.3-5 1.3-5 3.6 0 1.1 1 1.7 2.5 1.7s2.5-.5 2.5-1.5"/></svg>Profit</a>
   <a href="#create" data-p="create" id="navcreate" hidden><svg class="i" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 8v8M8 12h8"/></svg>Create</a>
   <a href="#fill" data-p="fill" id="navfill" hidden><svg class="i" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h9"/><path d="M18 14v6M15 17h6"/></svg>Fill up</a>
+  <a href="#restock" data-p="restock" id="navrestock" hidden><svg class="i" viewBox="0 0 24 24"><path d="M20 12a8 8 0 10-2.6 5.9"/><path d="M20 5v5h-5"/></svg>Auto restock</a>
   <a href="#server" data-p="server" id="navserver" hidden><svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>Server</a>
   <a href="#programs" data-p="programs" id="navprog" hidden><svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 10l3 2-3 2M13 14h4"/></svg>Programs</a>
   <a href="#users" data-p="users" id="navusers" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-4 3-6 7-6s7 2 7 6M17 5a3.5 3.5 0 010 7M22 20c0-3-2-5-4-5.5"/></svg>Users</a>
@@ -5379,7 +5610,38 @@ const DA={
 "Nothing to add.": "Der er intet at lægge op.",
 "Not available in preview mode.": "Ikke tilgængelig i forhåndsvisnings-tilstand.",
 "not one of the offers made here": "ikke et af de tilbud, der er lavet her",
-"only paused offers can be deleted here": "kun tilbud på pause kan slettes her"
+"only paused offers can be deleted here": "kun tilbud på pause kan slettes her",
+"Auto restock": "Auto restock",
+"1. Choose the offers that fill up by themselves": "1. Vælg de tilbud, der fyldes op af sig selv",
+"Select all": "Vælg alle",
+"Max stock": "Maks. lager",
+"The standard text (additional_info.txt)": "Standardteksten (additional_info.txt)",
+"Tick an offer and type the max stock it should be topped up to. Whenever the stock of a ticked offer is below its max, a program adds keys from the key list until it is full again.": "Sæt kryds ved et tilbud og skriv det maks. lager, det skal fyldes op til. Når lageret på et afkrydset tilbud er under maks, lægger et program keys op fra key-listen, til det er fuldt igen.",
+"2. Same max stock for all ticked offers": "2. Samme maks. lager til alle afkrydsede tilbud",
+"Set for all ticked": "Sæt for alle afkrydsede",
+"You can also type a different max stock on each offer above. This only fills in the boxes, nothing is saved until you save in step 3.": "Du kan også skrive et forskelligt maks. lager på hvert tilbud ovenfor. Det her udfylder kun felterne, der gemmes først, når du gemmer i trin 3.",
+"Cannot tell if it is 1 or 2 years from the title - choose an info text for this offer": "Kan ikke se ud fra titlen, om det er 1 eller 2 år - vælg en infotekst til dette tilbud",
+"Running": "Kører",
+"Stops after this round": "Stopper efter denne runde",
+"Starting…": "Starter…",
+"Not started here": "Ikke startet herfra",
+"Nothing has been saved on this page yet. The two programs that always ran (the 12 Months offer and the 2 Years offer, each up to 100) keep running as before and are ticked below. Change the list and save to take over.": "Der er endnu ikke gemt noget på denne side. De to programmer, der altid har kørt (12 Months-tilbuddet og 2 Years-tilbuddet, hver op til 100), kører videre som før og er afkrydset nedenfor. Ret listen og gem for at overtage.",
+"The dashboard is not starting programs on this server. Saving stores the list, but nothing is started from here.": "Dashboardet starter ikke programmer på denne server. Gem gemmer listen, men der startes ikke noget herfra.",
+"Type the max stock for every ticked offer (1 to 9999)": "Skriv det maks. lager for hvert afkrydset tilbud (1 til 9999)",
+"Cannot be saved": "Kan ikke gemmes",
+"missing now": "mangler nu",
+"already full": "allerede fuldt",
+"These stop being topped up (they stop after their current round, within about 5 minutes)": "Disse fyldes ikke længere op (de stopper efter deres nuværende runde, inden for ca. 5 minutter)",
+"There are fewer keys than the offers are missing now. They fill up as you add keys on the Keys page.": "Der er færre keys, end tilbuddene mangler lige nu. De fyldes op, efterhånden som du lægger keys på Keys-siden.",
+"Click again to save": "Klik igen for at gemme",
+"Turn off auto restock": "Slå auto restock fra",
+"3. Preview and save": "3. Forhåndsvis og gem",
+"No offers are ticked. Saving turns auto restock off for all offers.": "Ingen tilbud er afkrydset. Gem slår auto restock fra for alle tilbud.",
+"Some of the offers cannot be saved. Nothing was changed.": "Nogle af tilbuddene kan ikke gemmes. Der blev ikke ændret noget.",
+"A new max stock or a new Additional info text is picked up in the next round, no restart needed. Offers you untick stop by themselves after their current round.": "Et nyt maks. lager eller en ny Additional info-tekst bruges i næste runde, uden genstart. Tilbud, du fjerner krydset ved, stopper af sig selv efter deres nuværende runde.",
+"At most 40 offers can be on the list": "Der kan højst være 40 tilbud på listen",
+"Not saved": "Ikke gemt",
+"Auto restock is updated.": "Auto restock er opdateret."
 };
 
 const $=id=>document.getElementById(id);
@@ -5486,9 +5748,9 @@ function copyText(text,btn){
 }
 
 // ---------- pages ----------
-const PAGES=["overview","sales","history","orders","stock","reviews","keys","warroom","mindmap","profit","create","fill","programs","server","users","settings","news"];
-const ADMIN_PAGES=["warroom","mindmap","profit","create","fill","programs","server","users"];
-const TITLES={overview:"Overview",sales:"Sales",history:"History",programs:"Programs",server:"Server",orders:"Orders",stock:"Stock",reviews:"Reviews",keys:"Keys",warroom:"War-Room",mindmap:"Mindmap",profit:"Profit",create:"Create offers",fill:"Fill up offers",users:"Users",settings:"Settings",news:"What's new"};
+const PAGES=["overview","sales","history","orders","stock","reviews","keys","warroom","mindmap","profit","create","fill","restock","programs","server","users","settings","news"];
+const ADMIN_PAGES=["warroom","mindmap","profit","create","fill","restock","programs","server","users"];
+const TITLES={overview:"Overview",sales:"Sales",history:"History",programs:"Programs",server:"Server",orders:"Orders",stock:"Stock",reviews:"Reviews",keys:"Keys",warroom:"War-Room",mindmap:"Mindmap",profit:"Profit",create:"Create offers",fill:"Fill up offers",restock:"Auto restock",users:"Users",settings:"Settings",news:"What's new"};
 const page=()=>{const h=(location.hash||"#overview").slice(1);return PAGES.includes(h)?h:"overview";};
 const seen={};
 function once(name,key,fn){const k=JSON.stringify(key)+"|"+Math.floor(Date.now()/60000);if(seen[name]===k)return;seen[name]=k;fn();}
@@ -5810,7 +6072,7 @@ const CURRENCIES_ALL=()=>[MAIN,"DKK","USD","EUR"];
 const K0=()=>[LANG,HIDE];
 function render(d){
  isAdmin=d.user.role==="admin";
- ["navusers","navwar","navmind","navprofit","navcreate","navfill","navprog","navserver"].forEach(id=>{$(id).hidden=!isAdmin;});
+ ["navusers","navwar","navmind","navprofit","navcreate","navfill","navrestock","navprog","navserver"].forEach(id=>{$(id).hidden=!isAdmin;});
  if(ADMIN_PAGES.includes(page())&&!isAdmin){location.hash="#overview";return;}
  MAIN=d.rates.base;RATES=d.rates.rates;RATES_LIVE=d.rates.live;RATES_DATE=d.rates.date;
  if(!prefsApplied){prefsApplied=true;applyServerPrefs(d.prefs);translateStatic();setTitle();settingsUi();}
@@ -6334,6 +6596,7 @@ function pageLoad(force){
  if(p==="programs"&&isAdmin&&force){loadPrograms();}
  if(p==="create"&&isAdmin&&(force||!CR.fetched)){loadCreate();}
  if(p==="fill"&&isAdmin&&(force||!FL.fetched)){loadFill();}
+ if(p==="restock"&&isAdmin&&(force||!RS.fetched)){loadRestock(false);}
  if(p==="server"&&isAdmin&&(force||now-TT.srv>8000)){TT.srv=now;loadServer();}
  if(p==="users"&&isAdmin&&(force||now-TT.users>10000)){TT.users=now;users();loadDevices();}
  if(p==="settings"&&(force||now-TT.dev>15000)){TT.dev=now;loadDevices();}
@@ -6897,7 +7160,7 @@ document.body.prepend(defs.firstChild);
 const bar=document.createElement("div");bar.id="fxbar";document.body.appendChild(bar);
 const flash=document.createElement("div");flash.id="fxflash";document.body.appendChild(flash);
 
-const PC={overview:"#38bdf8",sales:"#34d399",history:"#a78bfa",orders:"#60a5fa",stock:"#fbbf24",reviews:"#f472b6",keys:"#2dd4bf",warroom:"#fb923c",mindmap:"#c084fc",profit:"#facc15",create:"#4ade80",fill:"#2dd4bf",programs:"#94a3b8",server:"#22d3ee",users:"#818cf8",settings:"#cbd5e1",news:"#f0abfc"};
+const PC={overview:"#38bdf8",sales:"#34d399",history:"#a78bfa",orders:"#60a5fa",stock:"#fbbf24",reviews:"#f472b6",keys:"#2dd4bf",warroom:"#fb923c",mindmap:"#c084fc",profit:"#facc15",create:"#4ade80",fill:"#2dd4bf",restock:"#a3e635",programs:"#94a3b8",server:"#22d3ee",users:"#818cf8",settings:"#cbd5e1",news:"#f0abfc"};
 function curPage(){const h=(location.hash||"#overview").slice(1);return PC[h]?h:"overview";}
 function setPageColor(){const p=curPage();document.body.dataset.page=p;const sk=window.NEXO_SKIN;document.body.style.setProperty("--pc",sk&&sk.acc&&document.documentElement.dataset.theme!=="light"?sk.acc:PC[p]);}
 window.__setPageColor=setPageColor;
@@ -8123,6 +8386,156 @@ document.addEventListener("click",async e=>{
 });
 setInterval(()=>{if(page()==="fill"&&isAdmin&&!document.hidden&&FL.job&&FL.job.state==="running")pollFill();},1500);
 
+// ================= auto restock (admin): which offers fill up by themselves, and up to what =================
+const RS={fetched:false,offers:[],sel:new Map(),saved:false,keys:0,info:{},programs:{},managed:true,plan:null,sent:null,armed:false,dirty:false,loadedOnce:false};
+const RS_MODES=[["auto","Automatic (from the title)"],["1ar","The 1 year text"],["2ar","The 2 years text"],["default","The standard text (additional_info.txt)"]];
+const RS_WHY={...CR_WHY,nokind:"Cannot tell if it is 1 or 2 years from the title - choose an info text for this offer"};
+const RS_ST={running:["Running","good"],stopping:["Stops after this round","warn"],starting:["Starting…","warn"],restarting:["Restarting","warn"],crashed:["Stopped, starting again","warn"],missing:["File not found","bad"],stopped:["Stopped","bad"]};
+const rsAllN=()=>{const v=parseInt($("rs-all").value,10);return Number.isFinite(v)?v:0;};
+const rsKindOf=(o,mode)=>mode==="auto"?(o&&o.kind)||"":mode;
+
+async function loadRestock(reset){
+ if(!isAdmin)return;
+ if(!RS.loadedOnce){RS.loadedOnce=true;const n=parseInt(lsGet("rs-all","100"),10);if(n>=1&&n<=9999)$("rs-all").value=n;}
+ try{const r=await fetch("/api/restock/offers");const j=await r.json().catch(()=>({}));
+  if(!r.ok){$("rs-list").innerHTML=`<div class="empty">${esc(t("Could not read your offers from Eldorado"))}: ${esc(t(j.error||String(r.status)))}</div>`;return;}
+  RS.fetched=true;RS.offers=j.offers||[];RS.keys=j.keys||0;RS.info=j.info||{};RS.programs=j.programs||{};RS.managed=j.managed!==false;RS.saved=!!j.saved;
+  if(reset||!RS.dirty){RS.sel=new Map((j.entries||[]).map(e=>[e.id,{target:e.target,info:e.info||"auto",title:e.title||""}]));RS.dirty=false;RS.plan=null;RS.armed=false;rsPrev();}
+  rsDraw();
+ }catch(e){}
+}
+function rsRowsSource(){
+ const ids=new Set(RS.offers.map(o=>o.id));
+ const ghosts=[...RS.sel.entries()].filter(([id])=>!ids.has(id)).map(([id,e])=>({id,title:e.title||id,state:"gone",quantity:null,price:null,kind:"",image:""}));
+ return ghosts.concat(RS.offers);
+}
+function rsPill(id){
+ const pr=RS.programs[id];
+ if(!pr){return RS.saved&&RS.sel.has(id)&&!RS.managed?`<span class="pill warn">${esc(t("Not started here"))}</span>`:"";}
+ const m=RS_ST[pr.state]||[pr.state,""];
+ return `<span class="pill ${m[1]}">${esc(t(m[0]))}</span>`;
+}
+function rsHint(o){
+ const e=RS.sel.get(o.id);if(!e)return "";
+ const k=rsKindOf(o,e.info);
+ if(!k)return `<span class="crwhy">${esc(t(RS_WHY.nokind))}</span>`;
+ const i=RS.info[k];
+ if(i&&!i.found)return `<span class="crwhy">${esc(t("The file")+" "+i.file+" "+t("was not found."))}</span>`;
+ if(i&&!i.ok)return `<span class="crwhy">${esc(i.file+" "+t("has no {KEY} where the key must go."))}</span>`;
+ return `<span class="muted crsmall">${esc(t("Additional info"))}: ${esc(i?i.file:"")}</span>`;
+}
+function rsRow(o){
+ const e=RS.sel.get(o.id),on=!!e,id=esc(o.id);
+ const ctl=on?`<div class="rsctl"><label><span>${esc(t("Max stock"))}</span><input type="number" min="1" max="9999" step="1" inputmode="numeric" data-rstarget="${id}" value="${e.target==null?"":esc(e.target)}"></label>
+  <label><span>${esc(t("Additional info text"))}</span><select data-rsinfo="${id}">${RS_MODES.map(m=>`<option value="${m[0]}" ${m[0]===e.info?"selected":""}>${esc(t(m[1]))}</option>`).join("")}</select></label>
+  <span class="rshint" data-rshint="${id}">${rsHint(o)}</span></div>`:"";
+ return `<div class="crrow rsrow${on?" on":""}"><input type="checkbox" id="rs-c-${id}" data-rsid="${id}" ${on?"checked":""}>
+  <label class="rsmain" for="rs-c-${id}"><span class="crth">${o.image?`<img src="${esc(o.image)}" alt="" loading="lazy" referrerpolicy="no-referrer">`:esc((o.title||"?").trim().slice(0,1).toUpperCase())}</span>
+  <span class="crt"><b>${esc(o.title)}</b><small>${crMoney(o.price,o.currency)}${o.quantity!=null?(o.price!=null?" · ":"")+t("Stock")+" "+esc(o.quantity):""}</small></span></label>
+  <span class="rsst" data-rsst="${id}">${rsPill(o.id)}</span><span class="pill ${crStateCls(o.state)}">${esc(crStateName(o.state))}</span>${ctl}</div>`;
+}
+function rsCount(){
+ const c=RS.sel.size;
+ $("rs-count").textContent=c?`${c} ${t("selected")}`:"";
+ $("rs-keys").innerHTML=`<span class="pill ${RS.keys?"good":"bad"}">${plural(RS.keys,"key")} ${t("left")}</span>`;
+ const note=$("rs-note");
+ const bits=[];
+ if(!RS.saved)bits.push(t("Nothing has been saved on this page yet. The two programs that always ran (the 12 Months offer and the 2 Years offer, each up to 100) keep running as before and are ticked below. Change the list and save to take over."));
+ if(!RS.managed)bits.push(t("The dashboard is not starting programs on this server. Saving stores the list, but nothing is started from here."));
+ note.hidden=!bits.length;note.innerHTML=bits.map(esc).join("<br>");
+}
+function rsDraw(){
+ const q=$("rs-q").value.trim().toLowerCase();
+ const list=rsRowsSource().filter(o=>!q||(o.title||"").toLowerCase().includes(q));
+ $("rs-list").innerHTML=list.length?list.map(rsRow).join(""):`<div class="empty">${esc(t("No offers found."))}</div>`;
+ rsCount();
+}
+function rsTouch(){RS.dirty=true;RS.plan=null;RS.armed=false;rsPrev();rsCount();}
+function rsEntries(){
+ const out=[];
+ for(const o of rsRowsSource()){const e=RS.sel.get(o.id);if(!e)continue;
+  const n=e.target;
+  if(!Number.isInteger(n)||n<1||n>9999){toast(t("Type the max stock for every ticked offer (1 to 9999)"),o.title);return null;}
+  out.push({id:o.id,target:n,info:e.info||"auto"});}
+ if(out.length>40){toast(t("At most 40 offers can be on the list"));return null;}
+ return out;
+}
+async function rsPreview(){
+ const entries=rsEntries();if(!entries)return;
+ const b=$("rs-gopreview");b.disabled=true;b.textContent=t("Reading from Eldorado…");
+ try{const r=await post("/api/restock/preview",{entries});const j=await r.json().catch(()=>({}));
+  if(!r.ok){toast(t("Could not make the preview"),t(j.error||""));return;}
+  RS.plan=j;RS.sent=entries;RS.armed=false;rsPrev();
+  $("rs-prev").scrollIntoView({behavior:reduceMotion()?"auto":"smooth",block:"nearest"});
+ }catch(e){toast(t("Could not make the preview"));}finally{b.disabled=false;b.textContent=t("Preview");}
+}
+function rsPrev(){
+ const p=RS.plan,box=$("rs-prev");if(!p){box.hidden=true;box.innerHTML="";return;}box.hidden=false;
+ const bad=p.items.length-p.ok;
+ const rows=p.items.map(it=>{
+  const pill=it.status==="ok"?`<span class="pill good">${esc(t("Max stock"))} ${esc(it.target)}</span>`:`<span class="pill warn">${esc(t("Cannot be saved"))}</span>`;
+  const why=it.status!=="ok"?`<div class="crwhy">${esc(t(RS_WHY[it.reason]||it.reason))}${it.msg?": "+esc(it.msg):""}</div>`:"";
+  const line=it.status==="ok"&&it.stock!=null?`<div class="muted crsmall">${esc(t("Stock"))}: ${esc(it.stock)} · ${it.missing?esc(t("missing now"))+" <b>"+plural(it.missing,"key")+"</b>":esc(t("already full"))} · ${esc(t("Additional info"))}: ${esc(it.info_file||"")}</div>`:"";
+  return `<div class="crp"><div>${pill}</div><div class="crpm"><div class="crtt">${esc(it.title||it.id)}</div>${why}${line}</div></div>`;}).join("");
+ const removed=p.removed&&p.removed.length?`<div class="crwarn">${esc(t("These stop being topped up (they stop after their current round, within about 5 minutes)"))}: ${p.removed.map(r=>esc(r.title||r.id)).join(", ")}</div>`:"";
+ const need=p.need>(p.keys||0)?`<div class="crwarn">${esc(t("There are fewer keys than the offers are missing now. They fill up as you add keys on the Keys page."))}</div>`:"";
+ const off=!p.items.length;
+ const btn=bad?"":`<button class="btn on" id="rs-save" type="button">${RS.armed?esc(t("Click again to save")):esc(t(off?"Turn off auto restock":"Save"))}</button>`;
+ box.innerHTML=`<h2>${esc(t("3. Preview and save"))} <span>${plural(p.ok,"offer")} · ${plural(p.need||0,"key")} ${esc(t("missing now"))} · ${plural(p.keys||0,"key")} ${t("left")}</span></h2>
+  ${off?`<div class="empty">${esc(t("No offers are ticked. Saving turns auto restock off for all offers."))}</div>`:rows}${removed}${need}
+  ${bad?`<div class="crwarn bad">${esc(t("Some of the offers cannot be saved. Nothing was changed."))}</div>`:""}
+  <div class="muted crsmall" style="margin-top:8px">${esc(t("A new max stock or a new Additional info text is picked up in the next round, no restart needed. Offers you untick stop by themselves after their current round."))}</div>
+  <div class="row" style="margin-top:12px">${btn}<button class="btn" id="rs-closeprev" type="button">${esc(t("Close"))}</button></div>`;
+}
+async function rsSave(){
+ if(!RS.plan||!RS.sent)return;
+ RS.armed=false;rsPrev();
+ try{const r=await post("/api/restock/save",{entries:RS.sent,confirm:true});const j=await r.json().catch(()=>({}));
+  if(!r.ok){toast(t("Not saved"),t(j.error||""));if(j.plan){RS.plan=j.plan;rsPrev();}return;}
+  RS.plan=null;RS.dirty=false;rsPrev();toast(t("Saved"),t("Auto restock is updated."));
+  await loadRestock(true);
+ }catch(e){toast(t("Not saved"));}
+}
+async function rsPoll(){
+ if(!isAdmin)return;
+ try{const r=await fetch("/api/restock/state");if(!r.ok)return;const j=await r.json();
+  RS.programs=j.programs||{};RS.managed=j.managed!==false;
+  qsa("[data-rsst]").forEach(el=>{el.innerHTML=rsPill(el.dataset.rsst);});
+ }catch(e){}
+}
+document.addEventListener("input",e=>{
+ const tg=e.target;
+ if(tg.id==="rs-q"){rsDraw();return;}
+ if(tg.dataset&&tg.dataset.rstarget){const s=RS.sel.get(tg.dataset.rstarget);if(s){const v=parseInt(tg.value,10);s.target=Number.isFinite(v)&&String(v)===tg.value.trim()?v:null;rsTouch();}}
+});
+document.addEventListener("change",e=>{
+ const tg=e.target;if(!tg.dataset)return;
+ if(tg.dataset.rsid){
+  if(tg.checked){const n=rsAllN();RS.sel.set(tg.dataset.rsid,{target:n>=1&&n<=9999?n:100,info:"auto",title:""});}else RS.sel.delete(tg.dataset.rsid);
+  rsTouch();rsDraw();
+  const el=document.getElementById("rs-c-"+tg.dataset.rsid);if(el&&tg.checked){const inp=qs('[data-rstarget="'+tg.dataset.rsid+'"]');if(inp&&matchMedia("(pointer:fine)").matches)inp.focus();}
+  return;}
+ if(tg.dataset.rsinfo){const s=RS.sel.get(tg.dataset.rsinfo);if(s){s.info=tg.value;rsTouch();
+  const o=rsRowsSource().find(x=>x.id===tg.dataset.rsinfo),h=qs('[data-rshint="'+tg.dataset.rsinfo+'"]');if(o&&h)h.innerHTML=rsHint(o);}}
+});
+document.addEventListener("click",e=>{
+ const id=e.target.id;
+ const visible=()=>{const q=$("rs-q").value.trim().toLowerCase();return rsRowsSource().filter(o=>!q||(o.title||"").toLowerCase().includes(q));};
+ const add=o=>{if(!RS.sel.has(o.id)){const n=rsAllN();RS.sel.set(o.id,{target:n>=1&&n<=9999?n:100,info:"auto",title:""});}};
+ if(id==="rs-selall"){visible().forEach(o=>{if(o.state!=="gone")add(o);});rsTouch();rsDraw();return;}
+ if(id==="rs-selnone"){visible().forEach(o=>RS.sel.delete(o.id));rsTouch();rsDraw();return;}
+ if(id==="rs-sel1"||id==="rs-sel2"){const k=id==="rs-sel1"?"1ar":"2ar";visible().forEach(o=>{if(o.kind===k)add(o);});rsTouch();rsDraw();return;}
+ const q=e.target.closest&&e.target.closest("[data-rsq]");if(q){$("rs-all").value=q.dataset.rsq;return;}
+ if(id==="rs-apply"){
+  const n=rsAllN();if(n<1||n>9999){toast(t("Type the max stock for every ticked offer (1 to 9999)"));return;}
+  if(!RS.sel.size){toast(t("Choose at least one offer first"));return;}
+  lsSet("rs-all",String(n));RS.sel.forEach(s=>{s.target=n;});rsTouch();rsDraw();return;}
+ if(id==="rs-gopreview"){rsPreview();return;}
+ if(id==="rs-closeprev"){RS.plan=null;RS.armed=false;rsPrev();return;}
+ if(id==="rs-save"){if(!RS.armed){RS.armed=true;rsPrev();setTimeout(()=>{if(RS.armed){RS.armed=false;rsPrev();}},5000);return;}rsSave();return;}
+});
+setInterval(()=>{if(page()==="restock"&&isAdmin&&!document.hidden)rsPoll();},5000);
+
 </script></body></html>"""
 
 
@@ -8181,7 +8594,7 @@ def main():
         if not a.no_programs and os.getenv("MANAGE_PROGRAMS", "1") != "0":
             only = {x.strip() for x in os.getenv("PROGRAMS", "").split(",") if x.strip()}
             start_programs(only or None)
-            print("Starting the other programs: " + ", ".join(n for n, _, _ in PROGRAM_LIST if not only or n in only))
+            print("Starting the other programs: " + ", ".join(n for n, _, _, _ in _program_specs() if not only or n in only or (n.startswith("restock-") and "offer" in only)))
 
     threading.Thread(target=_security_loop, daemon=True).start()
     print(f"Dashboard on http://localhost:{PORT}  (stop with Ctrl+C)")

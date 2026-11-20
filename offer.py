@@ -22,6 +22,7 @@ Channel: REFILL_WEBHOOK_URL in .env, otherwise DISCORD_WEBHOOK_URL.
 import argparse
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -271,17 +272,87 @@ def only_one_copy(port=47234):
 
 
 _LOCK = None
+RESTOCK_CONFIG = Path("auto_restock.json")   # made by the dashboard's Auto restock page
 
 
-def auto(client, offer_id, info, target, batch, every, offer_title="?", port=47234):
-    """Tops the stock up to the target, in steps of `batch` keys."""
+def _managed_entry(offer_id):
+    """("ok", entry) while the offer is on the Auto restock list, ("gone", None) once it was taken off, ("unknown", None) when the
+    list cannot be read right now (then nothing changes)."""
+    try:
+        data = json.loads(RESTOCK_CONFIG.read_text(encoding="utf-8"))
+        for e in data.get("entries") or []:
+            if e.get("id") == offer_id:
+                t = int(e["target"])
+                return ("ok", e) if 1 <= t <= 9999 else ("unknown", None)
+        return "gone", None
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return "unknown", None
+
+
+def managed_target(offer_id):
+    """For programs started by the Auto restock page: ("ok", max_stock) while the offer is on the list, ("gone", None) once it was
+    taken off, ("unknown", None) when the list cannot be read right now (then nothing changes)."""
+    state, e = _managed_entry(offer_id)
+    return (state, int(e["target"])) if state == "ok" else (state, None)
+
+
+INFO_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,60}\.txt$")
+
+
+def managed_info(offer_id):
+    """The Additional info file the Auto restock page chose for this offer ('' when it did not say)."""
+    state, e = _managed_entry(offer_id)
+    name = e.get("info_file") if state == "ok" else ""
+    return name if isinstance(name, str) and INFO_NAME_RE.match(name) else ""
+
+
+def load_info_named(name):
+    """Reads another Additional info file. Returns (text, '') or (None, why). Never stops the program."""
+    f = next((b / name for b in (Path.cwd(), Path(__file__).resolve().parent) if (b / name).is_file()), None)
+    if f is None:
+        return None, f"{name} was not found"
+    text = f.read_text(encoding="utf-8").rstrip()
+    if PLACEHOLDER not in text:
+        return None, f"{name} has no {PLACEHOLDER} where the key must go"
+    try:
+        check_info_length(text)
+    except SystemExit:
+        return None, f"{name} is too long for Eldorado"
+    return text, ""
+
+
+def auto(client, offer_id, info, target, batch, every, offer_title="?", port=47234, managed=False):
+    """Tops the stock up to the target, in steps of `batch` keys.
+    managed=True (started by the Auto restock page): the max stock is read from auto_restock.json every round, and the program
+    stops by itself (between two rounds, never in the middle of adding keys) when the offer is taken off the list."""
     only_one_copy(port)
     print(f"Auto mode: keeping the stock at {target}. When it is {batch} or more below, "
           f"I add keys from keys.txt. Checking every {every} seconds. Stop with Ctrl+C.")
     warned = False
     delay = every
     pause_after_error = False
+    info_name, bad_info = INFO_FILE.name, set()
     while True:
+        if managed:
+            state, new_target = managed_target(offer_id)
+            if state == "gone":
+                print("This offer was taken off the Auto restock page. Stopping.", flush=True)
+                return
+            if state == "ok" and new_target != target:
+                print(f"New max stock from the Auto restock page: {target} -> {new_target}.", flush=True)
+                target, warned = new_target, False
+            if state == "ok":
+                fname = managed_info(offer_id)
+                if fname and fname != info_name and fname not in bad_info:
+                    new_text, why = load_info_named(fname)
+                    if new_text is None:
+                        bad_info.add(fname)
+                        print(f"The Auto restock page chose {fname}, but {why}. Keeping {info_name}.", flush=True)
+                    else:
+                        print(f"New Additional info text from the Auto restock page: {info_name} -> {fname}.", flush=True)
+                        info, info_name = new_text, fname
+                elif fname == info_name:
+                    bad_info.clear()
         try:
             stock = quantity(client, offer_id)
             if stock is None:
@@ -410,6 +481,7 @@ def main():
     ap.add_argument("--id", default="", help="the exact offer id (use it when several offers have the same words in the title)")
     ap.add_argument("--info", default="additional_info.txt", help="file with the Additional info text ({KEY} = the key)")
     ap.add_argument("--port", type=int, default=47234, help="auto: lock port, one per offer")
+    ap.add_argument("--managed", action="store_true", help="auto: the max stock and whether to keep running come from auto_restock.json (the Auto restock page)")
     ap.add_argument("--target", type=int, default=100)
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--every", type=int, default=10)
@@ -433,7 +505,7 @@ def main():
         print(f"Stock now: {offer.get('quantity')}")
         print(f"Additional info: {check_info_length(info)} of {MAX_INFO} characters (with a key in it)")
         try:
-            auto(client, offer_id, info, a.target, a.batch, a.every, offer.get("offerTitle") or "?", a.port)
+            auto(client, offer_id, info, a.target, a.batch, a.every, offer.get("offerTitle") or "?", a.port, managed=a.managed)
         except KeyboardInterrupt:
             print("\nStopped.")
         return

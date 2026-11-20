@@ -211,7 +211,7 @@ def kind_of_title(title):
 
 def info_text(kind):
     """The Additional info text for 1 year (info_1ar.txt, else additional_info.txt) or 2 years (info_2ar.txt)."""
-    names = ("info_2ar.txt",) if kind == "2ar" else ("info_1ar.txt", "additional_info.txt")
+    names = ("info_2ar.txt",) if kind == "2ar" else ("additional_info.txt",) if kind == "default" else ("info_1ar.txt", "additional_info.txt")
     for n in names:
         for base in (Path.cwd(), HERE):
             f = base / n
@@ -652,7 +652,7 @@ def _resp(status, text):
 def demo_info(kind):
     return ("Thank you for your order!\n1) Go to netflix.com and use the key below.\nKEY: " + O.PLACEHOLDER +
             "\nPlan: " + ("2 years" if kind == "2ar" else "1 year") + "\nIf you leave a good review we will be happy."), \
-        ("info_2ar.txt" if kind == "2ar" else "info_1ar.txt")
+        ("info_2ar.txt" if kind == "2ar" else "additional_info.txt" if kind == "default" else "info_1ar.txt")
 
 
 # ---------------------------------------------------------------- command line (copies without keys)

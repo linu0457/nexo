@@ -11,6 +11,10 @@ echo.
 if exist keys.txt (for /f %%a in ('find /c /v "" ^< keys.txt') do echo  Linjer i keys.txt: %%a) else echo  keys.txt findes ikke
 if exist keys_inbox.txt (for /f %%a in ('find /c /v "" ^< keys_inbox.txt') do echo  Linjer i keys_inbox.txt ^(uploadet, ikke hentet endnu^): %%a) else echo  keys_inbox.txt: tom ^(ok^)
 echo.
-echo  Restock laegger KUN keys op naar lageret er UNDER 100. Er lageret 100 eller mere, venter den.
+if exist auto_restock.json (
+  echo  Hvilke offers der fyldes op, og til hvad, staar paa siden "Auto restock" i dashboardet.
+) else (
+  echo  Restock laegger KUN keys op naar lageret er UNDER 100. Er lageret 100 eller mere, venter den.
+)
 echo.
 pause
