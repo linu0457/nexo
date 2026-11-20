@@ -1448,10 +1448,10 @@ def api_opret_preview():
         return bad
     eng = _opret_eng()
     try:
-        ids, find, repl, info = eng.clean_args(request.get_json(silent=True) or {})
+        ids, rules, info = eng.clean_args(request.get_json(silent=True) or {})
     except ValueError as e:
         return jsonify(error=str(e)), 400
-    plan = eng.make_plan(_opret_client("read"), ids, find, repl, info, _opret_keys().left(), _opret_loader())
+    plan = eng.make_plan(_opret_client("read"), ids, rules, info, _opret_keys().left(), _opret_loader())
     return jsonify(eng.public_plan(plan))
 
 
@@ -1490,7 +1490,7 @@ def api_opret_start():
     eng = _opret_eng()
     j = request.get_json(silent=True) or {}
     try:
-        ids, find, repl, info = eng.clean_args(j)
+        ids, rules, info = eng.clean_args(j)
     except ValueError as e:
         return jsonify(error=str(e)), 400
     if j.get("confirm") is not True or not isinstance(j.get("expect"), int):
@@ -1502,7 +1502,7 @@ def api_opret_start():
     started = False
     try:
         keys, loader = _opret_keys(), _opret_loader()
-        plan = eng.make_plan(_opret_client("job"), ids, find, repl, info, keys.left(), loader)
+        plan = eng.make_plan(_opret_client("job"), ids, rules, info, keys.left(), loader)
         if plan["ok"] != j["expect"]:
             return jsonify(error="The preview is out of date. Press Preview again.", ok=plan["ok"]), 409
         if not plan["ok"]:
@@ -1512,7 +1512,7 @@ def api_opret_start():
         _opret["job"] = job
         threading.Thread(target=_opret_run, args=(plan, job, keys, loader), daemon=True, name="opret").start()
         started = True
-        print(f"{job['by']} started creating {plan['ok']} offer copies ({find} -> {repl}).", flush=True)
+        print(f"{job['by']} started creating {plan['ok']} offer copies ({'; '.join(f + ' -> ' + r for f, r in rules)}).", flush=True)
         return jsonify(ok=True, count=plan["ok"])
     finally:
         if not started:
@@ -4276,8 +4276,9 @@ body.redon{overflow:hidden}
 .crth img{width:100%;height:100%;object-fit:cover;display:block}
 .crt{min-width:0;flex:1}.crt b{display:block;font-weight:600;overflow-wrap:anywhere}.crt small{color:var(--muted);font-size:12px}
 .crform{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
-.crform label{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--muted)}
-.crform input,.crform select{font-size:14px;width:100%}
+.crrules{display:flex;flex-direction:column;gap:10px}.crrule{display:grid;grid-template-columns:2fr 2fr;gap:12px}
+.crform label,.crrule label{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--muted)}
+.crform input,.crform select,.crrule input{font-size:14px;width:100%}
 .crp{display:grid;grid-template-columns:150px 1fr;gap:6px 14px;padding:12px 0;border-bottom:1px solid var(--line);align-items:start}
 .crp:last-of-type{border-bottom:0}
 .crpm{min-width:0}.crtt{overflow-wrap:anywhere;line-height:1.45}.crtt.new{margin-top:2px;color:var(--ink)}
@@ -4289,7 +4290,7 @@ mark.n{background:var(--accentbg);color:var(--accent);border-radius:4px;padding:
 .crwarn{margin-top:10px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--amberbg);color:var(--amber);font-size:13px;overflow-wrap:anywhere}
 .crwarn.bad{background:var(--redbg);color:var(--red);border-color:var(--red)}
 .crbad{color:var(--red)!important}
-@media(max-width:820px){.crlist{max-height:320px}.crrow{gap:10px;padding:9px 10px}.crp{grid-template-columns:1fr}.crp>div:first-child{display:flex;gap:6px;flex-wrap:wrap}}
+@media(max-width:820px){.crrule{grid-template-columns:1fr}.crlist{max-height:320px}.crrow{gap:10px;padding:9px 10px}.crp{grid-template-columns:1fr}.crp>div:first-child{display:flex;gap:6px;flex-wrap:wrap}}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
@@ -4361,12 +4362,18 @@ mark.n{background:var(--accentbg);color:var(--accent);border-radius:4px;padding:
   <div class="dyn crlist" id="cr-list"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div>
   <div class="muted" style="font-size:12.5px;margin-top:10px">The originals are never changed. Every choice becomes a new copy.</div></div>
  <div class="panel" style="margin-top:14px"><h2>2. What should change?</h2>
-  <div class="crform">
-   <label><span>Find (a comma means or)</span><input id="cr-find" value="1 year, 12 months" maxlength="120" autocomplete="off"></label>
-   <label><span>Change to</span><input id="cr-repl" value="2 Years" maxlength="80" autocomplete="off"></label>
+  <div class="crrules" id="cr-rules">
+   <div class="crrule"><label><span>Find (a comma means or)</span><input class="cr-f" value="1 year, 12 months" maxlength="120" autocomplete="off"></label>
+    <label><span>Change to</span><input class="cr-r" value="2 Years" maxlength="80" autocomplete="off"></label></div>
+   <div class="crrule"><label><span>Also find (optional)</span><input class="cr-f" value="365 Days Replacement Warranty" maxlength="120" autocomplete="off"></label>
+    <label><span>Change to</span><input class="cr-r" value="2 Years Replacement Warranty" maxlength="80" autocomplete="off"></label></div>
+   <div class="crrule"><label><span>Also find (optional)</span><input class="cr-f" value="" maxlength="120" autocomplete="off"></label>
+    <label><span>Change to</span><input class="cr-r" value="" maxlength="80" autocomplete="off"></label></div>
+  </div>
+  <div class="crform" style="margin-top:12px">
    <label><span>Additional info text</span><select id="cr-info"><option value="auto">Automatic (from the new title)</option><option value="1ar">The 1 year text</option><option value="2ar">The 2 years text</option></select></label>
   </div>
-  <div class="muted" style="font-size:12.5px;margin-top:10px">The find text is swapped in the title and in the description. Everything else (price, pictures, settings) is identical. Each copy gets 1 key in the first account slot ("Scroll Down" + the Additional info text) and is created on pause.</div>
+  <div class="muted" style="font-size:12.5px;margin-top:10px">The find texts are swapped in the title and in the description (empty rows are ignored). The title must contain at least one of them. Everything else (price, pictures, settings) is identical. Each copy gets 1 key in the first account slot ("Scroll Down" + the Additional info text) and is created on pause.</div>
   <div class="crwarn" id="cr-warn" hidden></div>
   <div class="row" style="margin-top:12px"><button class="btn on" id="cr-gopreview" type="button">Preview</button></div></div>
  <div class="panel" id="cr-prev" style="margin-top:14px" hidden></div>
@@ -5114,12 +5121,13 @@ const DA={
 "The originals are never changed. Every choice becomes a new copy.": "Originalerne ændres aldrig. Hvert valg bliver til en ny kopi.",
 "2. What should change?": "2. Hvad skal ændres?",
 "Find (a comma means or)": "Find (komma betyder eller)",
+"Also find (optional)": "Find også (valgfri)",
 "Change to": "Skift til",
 "Additional info text": "Tekst i Additional info",
 "Automatic (from the new title)": "Automatisk (ud fra den nye titel)",
 "The 1 year text": "Teksten til 1 år",
 "The 2 years text": "Teksten til 2 år",
-"The find text is swapped in the title and in the description. Everything else (price, pictures, settings) is identical. Each copy gets 1 key in the first account slot (\"Scroll Down\" + the Additional info text) and is created on pause.": "Find-teksten bliver skiftet ud i titlen og i beskrivelsen. Alt andet (pris, billeder, indstillinger) er identisk. Hver kopi får 1 key i første account-slot (\"Scroll Down\" + teksten i Additional info) og bliver oprettet på pause.",
+"The find texts are swapped in the title and in the description (empty rows are ignored). The title must contain at least one of them. Everything else (price, pictures, settings) is identical. Each copy gets 1 key in the first account slot (\"Scroll Down\" + the Additional info text) and is created on pause.": "Find-teksterne bliver skiftet ud i titlen og i beskrivelsen (tomme rækker ignoreres). Titlen skal indeholde mindst én af dem. Alt andet (pris, billeder, indstillinger) er identisk. Hver kopi får 1 key i første account-slot (\"Scroll Down\" + teksten i Additional info) og bliver oprettet på pause.",
 "Preview": "Forhåndsvisning",
 "Made here": "Lavet her",
 "Nothing made yet.": "Intet lavet endnu.",
@@ -7667,6 +7675,7 @@ function crRx(find){   // the same rule as the server: spaces/hyphens alike, opt
    return "(?<![A-Za-z0-9])"+p.join("[\\s-]+")+"(?![A-Za-z0-9])";});
   return alts.length?new RegExp(alts.join("|"),"i"):null;}catch(e){return null;}
 }
+const crRules=()=>qsa("#cr-rules .crrule").map(r=>({find:qs(".cr-f",r).value.trim(),repl:qs(".cr-r",r).value.trim()}));
 const crParts=(parts,cls)=>(parts||[]).map(([x,ch])=>ch?`<mark class="${cls}">${esc(x)}</mark>`:esc(x)).join("");
 const crCopies=n=>n+" "+t(n===1?"copy":"copies");
 const crMoney=(a,c)=>a==null?"":fmt(a,2)+" "+esc(c||"");
@@ -7675,8 +7684,8 @@ const crStateCls=s=>({Active:"good",Paused:"warn",gone:"bad"}[s]||"");
 
 async function loadCreate(){
  if(!isAdmin)return;
- const f=lsGet("cr-find",""),r0=lsGet("cr-repl","");
- if(!CR.loadedOnce){CR.loadedOnce=true;if(f)$("cr-find").value=f;if(r0)$("cr-repl").value=r0;}
+ if(!CR.loadedOnce){CR.loadedOnce=true;try{const sv=JSON.parse(lsGet("cr-rules","null"));
+  if(Array.isArray(sv))qsa("#cr-rules .crrule").forEach((r,i)=>{if(sv[i]){qs(".cr-f",r).value=sv[i].find||"";qs(".cr-r",r).value=sv[i].repl||"";}});}catch(e){}}
  try{const r=await fetch("/api/opret/offers");const j=await r.json().catch(()=>({}));
   if(!r.ok){$("cr-list").innerHTML=`<div class="empty">${esc(t("Could not read your offers from Eldorado"))}: ${esc(t(j.error||String(r.status)))}</div>`;return;}
   CR.fetched=true;CR.offers=j.offers||[];CR.made=j.created||[];CR.copied=j.copied||{};CR.keys=j.keys||0;CR.info=j.info||{};
@@ -7704,8 +7713,8 @@ function crSelectedIds(){return CR.offers.map(o=>o.id).filter(i=>CR.sel.has(i));
 async function crPreview(){
  const ids=crSelectedIds();
  if(!ids.length){toast(t("Choose at least one offer first"));return;}
- const args={ids,find:$("cr-find").value.trim(),repl:$("cr-repl").value.trim(),info:$("cr-info").value};
- lsSet("cr-find",args.find);lsSet("cr-repl",args.repl);
+ const args={ids,rules:crRules(),info:$("cr-info").value};
+ lsSet("cr-rules",JSON.stringify(args.rules));
  const b=$("cr-gopreview");b.disabled=true;b.textContent=t("Reading from Eldorado…");
  try{const r=await post("/api/opret/preview",args);const j=await r.json().catch(()=>({}));
   if(!r.ok){toast(t("Could not make the preview"),t(j.error||""));return;}
@@ -7799,7 +7808,7 @@ document.addEventListener("change",e=>{
 document.addEventListener("click",async e=>{
  const id=e.target.id;
  if(id==="cr-selnone"){CR.sel.clear();crDraw();return;}
- if(id==="cr-selmatch"){const rx=crRx($("cr-find").value);if(!rx){toast(t("Type what to find first"));return;}
+ if(id==="cr-selmatch"){const rx=crRx(crRules()[0].find);if(!rx){toast(t("Type what to find first"));return;}
   CR.offers.forEach(o=>{if(rx.test(o.title))CR.sel.add(o.id);});crDraw();return;}
  if(id==="cr-gopreview"){crPreview();return;}
  if(id==="cr-closeprev"){CR.plan=null;crPrev();return;}

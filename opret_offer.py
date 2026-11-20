@@ -129,8 +129,8 @@ def err_text(e):
 
 # ---------------------------------------------------------------- find / replace in title and description
 
-def word_regex(find):
-    """'1 year, 12 months' -> one case-insensitive pattern. Spaces and hyphens are interchangeable ('12-Months' matches),
+def _find_pattern(find):
+    """'1 year, 12 months' -> one pattern text. Spaces and hyphens are interchangeable ('12-Months' matches),
     a final plural s is optional ('12 month' matches), and a number is never the tail of a longer number ('11 years' is left alone)."""
     alts = []
     for a in str(find).split(","):
@@ -145,7 +145,28 @@ def word_regex(find):
         alts.append(r"(?<![A-Za-z0-9])" + r"[\s\-]+".join(parts) + r"(?![A-Za-z0-9])")
     if not alts:
         raise ValueError("bad find")
-    return re.compile("|".join(alts), re.I)
+    return "|".join(alts)
+
+
+def word_regex(find):
+    return re.compile(_find_pattern(find), re.I)
+
+
+def rules_regex(rules):
+    """Several find/replace rules in ONE pass over the text (so a replaced piece is never changed again).
+    rules = [(find, replace), ...]  ->  (compiled pattern, function that gives the replacement for a match)."""
+    pats, repls = [], []
+    for i, (find, repl) in enumerate(rules):
+        pats.append(f"(?P<r{i}>{_find_pattern(find)})")
+        repls.append(repl)
+    rx = re.compile("|".join(pats), re.I)
+
+    def repl_for(m):
+        for i, rp in enumerate(repls):
+            if m.group(f"r{i}") is not None:
+                return rp
+        return ""
+    return rx, repl_for
 
 
 def swap(text, rx, repl):
@@ -157,7 +178,7 @@ def swap(text, rx, repl):
             old_p.append([text[pos:m.start()], False])
             new_p.append([text[pos:m.start()], False])
         old_p.append([m.group(0), True])
-        new_p.append([repl, True])
+        new_p.append([repl(m) if callable(repl) else repl, True])
         pos = m.end()
         n += 1
     if pos < len(text) or not n:
@@ -207,8 +228,11 @@ def info_status(loader=None):
     return out
 
 
+MAX_RULES = 4
+
+
 def clean_args(j):
-    """Checks what the page sends. Raises ValueError with a short code."""
+    """Checks what the page sends. Returns (ids, rules, info_mode); rules = [(find, replace), ...]. Raises ValueError with a short code."""
     ids = j.get("ids")
     if not isinstance(ids, list) or not ids:
         raise ValueError("no offers chosen")
@@ -220,17 +244,30 @@ def clean_args(j):
             seen.append(x)
     if len(seen) > MAX_COPIES:
         raise ValueError(f"at most {MAX_COPIES} offers at a time")
-    find = str(j.get("find", "")).strip()
-    repl = str(j.get("repl", "")).strip()
-    if len(find) < 2 or len(find) > 120:
+    raw = j.get("rules")
+    if raw is None:                                   # one rule the old way
+        raw = [{"find": j.get("find", ""), "repl": j.get("repl", "")}]
+    if not isinstance(raw, list) or len(raw) > MAX_RULES:
         raise ValueError("bad find")
-    if not repl or len(repl) > 80 or "\n" in repl:
-        raise ValueError("bad replace")
+    rules = []
+    for r in raw:
+        if not isinstance(r, dict):
+            raise ValueError("bad find")
+        find, repl = str(r.get("find", "")).strip(), str(r.get("repl", "")).strip()
+        if not find and not repl:                     # an empty row is ignored
+            continue
+        if len(find) < 2 or len(find) > 120:
+            raise ValueError("bad find")
+        if not repl or len(repl) > 80 or "\n" in repl:
+            raise ValueError("bad replace")
+        word_regex(find)
+        rules.append((find, repl))
+    if not rules:
+        raise ValueError("bad find")
     info = j.get("info", "auto")
     if info not in ("auto", "1ar", "2ar"):
         raise ValueError("bad info")
-    word_regex(find)
-    return seen, find, repl, info
+    return seen, rules, info
 
 
 # ---------------------------------------------------------------- keys
@@ -358,11 +395,11 @@ def list_offers(client):
 
 # ---------------------------------------------------------------- plan (changes nothing) and execution
 
-def make_plan(client, ids, find, repl, info_mode="auto", keys_left=None, loader=None):
+def make_plan(client, ids, rules, info_mode="auto", keys_left=None, loader=None):
     """What would be created. Reads the originals from Eldorado, changes nothing.
     Each item has status: ok | skip (reason) | nokeys. Items starting with _ are internal (not for the page)."""
     loader = loader or info_text
-    rx = word_regex(find)
+    rx, repl = rules_regex(rules)
     items = []
     before = {}
     for entry in read_log():
@@ -534,6 +571,7 @@ def delete_offer(client, offer_id):
 class DemoClient:
     """Pretends to be Eldorado: a few Netflix offers, creating, pausing, resuming, deleting."""
     BASE_DESC = ("Netflix Premium 4K account - valid for {p}.\nDelivered instantly after payment.\n"
+                 "\u2705 365 Days Replacement Warranty\n"
                  "Warranty: {p}. If anything stops working we replace it.")
 
     def __init__(self):
