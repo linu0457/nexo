@@ -81,7 +81,7 @@ CURRENCIES = ("DKK", "USD", "EUR")
 SOUNDS = ("ding", "bell", "pop", "chime", "none")
 NOTIFY_KINDS = ("warroom", "orders", "reviews", "keys")
 OVERVIEW_TILES = ("today", "month", "all", "avg", "stock", "profit", "taxpot", "lastorder", "revrate", "pending", "reviews", "keys", "latest", "chart", "stockp", "status", "others", "stockval", "forecast")
-NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys", "warroom", "mindmap", "profit", "programs", "server", "users", "settings", "news")
+NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys", "warroom", "mindmap", "profit", "create", "programs", "server", "users", "settings", "news")
 BACKGROUNDS = ("", "dots", "grid", "waves", "aurora", "diagonal")
 DEFAULT_PREFS = {"lang": "", "accent": "", "currency": "", "sound": "ding", "gross": None, "tax": 37,
                  "emoji": "", "color": "", "bg": "", "hide": [], "menu": [], "pins": [], "payout": 5, "ovorder": [],
@@ -1370,6 +1370,212 @@ def api_keys_find():
         total = len(hits)
     return jsonify(queued=any(low == k.lower() for k in queued), uploaded=any(low == k.lower() for k in used),
                    orders=found, matches=total, tracked=tracked)
+
+
+# ---------- create offers: copies of existing offers (admin only) ----------
+# The engine lives in opret_offer.py (also usable from the command line). This is only the web part.
+_opret = {"lock": threading.Lock(), "busy": False, "job": None, "clients": {}, "keys": None}
+
+
+def _opret_eng():
+    import opret_offer
+    return opret_offer
+
+
+def _opret_client(kind):
+    eng = _opret_eng()
+    with _opret["lock"]:
+        key = "demo" if DEMO else kind
+        c = _opret["clients"].get(key)
+        if c is None:
+            if DEMO:
+                c = eng.DemoClient()
+            else:
+                from eldorado_client import EldoradoClient
+                c = EldoradoClient()
+            _opret["clients"][key] = c
+        return c
+
+
+def _opret_keys():
+    eng = _opret_eng()
+    if DEMO:
+        with _opret["lock"]:
+            if _opret["keys"] is None:
+                _opret["keys"] = eng.ListKeys([f"NETF-DEMO-{i:04d}-ABCD-EFGH" for i in range(1, 9)])
+            return _opret["keys"]
+    return eng.FileKeys()
+
+
+def _opret_loader():
+    eng = _opret_eng()
+    return eng.demo_info if DEMO else eng.info_text
+
+
+def _opret_guard():
+    bad = api_guard(admin=True)
+    if bad:
+        return bad
+    if PREVIEW:
+        return jsonify(error="Not available in preview mode."), 403
+    return None
+
+
+@app.route("/api/opret/offers")
+def api_opret_offers():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    eng = _opret_eng()
+    try:
+        offers = eng.list_offers(_opret_client("read"))
+    except requests.RequestException as e:
+        return jsonify(error=eng.err_text(e)), 502
+    state = {o["id"]: o["state"] for o in offers}
+    log = eng.read_log()
+    created = [dict(e, state=state.get(e["id"], "gone")) for e in reversed(log[-60:])]
+    copied = {}
+    for e in log:
+        if e.get("src") and state.get(e["id"]):          # only copies that still exist
+            copied[e["src"]] = copied.get(e["src"], 0) + 1
+    return jsonify(offers=offers, created=created, copied=copied, keys=_opret_keys().left(), info=eng.info_status(_opret_loader()), demo=DEMO)
+
+
+@app.route("/api/opret/preview", methods=["POST"])
+def api_opret_preview():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    eng = _opret_eng()
+    try:
+        ids, find, repl, info = eng.clean_args(request.get_json(silent=True) or {})
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    plan = eng.make_plan(_opret_client("read"), ids, find, repl, info, _opret_keys().left(), _opret_loader())
+    return jsonify(eng.public_plan(plan))
+
+
+def _opret_snapshot(job):
+    eng = _opret_eng()
+    out = eng.public_plan({"keys": None, "ok": 0, "items": job["items"]})
+    return {"state": job["state"], "created": job["created"], "total": job.get("total", 0), "error": job["error"], "log": job["log"][-30:],
+            "started": job["started"], "finished": job.get("finished", ""), "stopping": job["stop"],
+            "items": [{k: it.get(k, "") for k in ("id", "status", "reason", "msg", "title", "new_title", "new_id", "kind")} for it in out["items"]]}
+
+
+def _opret_run(plan, job, keys, loader):
+    eng = _opret_eng()
+    now = lambda: datetime.now(timezone.utc).isoformat()
+
+    def emit(msg=None):
+        if msg:
+            job["log"].append({"t": now(), "x": str(msg)[:300]})
+    try:
+        res = eng.execute(_opret_client("job"), plan, keys, emit, lambda: job["stop"], loader)
+        job.update(state=res["state"], error=res["error"], created=res["created"])
+    except Exception as e:
+        job.update(state="failed", error=f"{type(e).__name__}: {e}"[:300])
+    finally:
+        job["finished"] = now()
+        with _opret["lock"]:
+            _opret["busy"] = False
+    print(f"Create offers finished: {job['state']}, {job['created']} created. {job['error']}", flush=True)
+
+
+@app.route("/api/opret/start", methods=["POST"])
+def api_opret_start():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    eng = _opret_eng()
+    j = request.get_json(silent=True) or {}
+    try:
+        ids, find, repl, info = eng.clean_args(j)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    if j.get("confirm") is not True or not isinstance(j.get("expect"), int):
+        return jsonify(error="bad request"), 400
+    with _opret["lock"]:
+        if _opret["busy"]:
+            return jsonify(error="Something is already being created. Wait for it to finish."), 409
+        _opret["busy"] = True
+    started = False
+    try:
+        keys, loader = _opret_keys(), _opret_loader()
+        plan = eng.make_plan(_opret_client("job"), ids, find, repl, info, keys.left(), loader)
+        if plan["ok"] != j["expect"]:
+            return jsonify(error="The preview is out of date. Press Preview again.", ok=plan["ok"]), 409
+        if not plan["ok"]:
+            return jsonify(error="Nothing to create."), 400
+        job = {"state": "running", "created": 0, "total": plan["ok"], "error": "", "log": [], "items": plan["items"], "stop": False,
+               "started": datetime.now(timezone.utc).isoformat(), "by": current_user()["name"]}
+        _opret["job"] = job
+        threading.Thread(target=_opret_run, args=(plan, job, keys, loader), daemon=True, name="opret").start()
+        started = True
+        print(f"{job['by']} started creating {plan['ok']} offer copies ({find} -> {repl}).", flush=True)
+        return jsonify(ok=True, count=plan["ok"])
+    finally:
+        if not started:
+            with _opret["lock"]:
+                _opret["busy"] = False
+
+
+@app.route("/api/opret/status")
+def api_opret_status():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    job = _opret["job"]
+    return jsonify(job=_opret_snapshot(job) if job else None)
+
+
+@app.route("/api/opret/stop", methods=["POST"])
+def api_opret_stop():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    job = _opret["job"]
+    if job and job["state"] == "running":
+        job["stop"] = True
+    return jsonify(ok=True)
+
+
+@app.route("/api/opret/live", methods=["POST"])
+def api_opret_live():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    eng = _opret_eng()
+    ids = (request.get_json(silent=True) or {}).get("ids")
+    if not isinstance(ids, list) or not ids or len(ids) > eng.MAX_COPIES:
+        return jsonify(error="bad request"), 400
+    res = {}
+    for oid in ids:
+        try:
+            res[str(oid)] = eng.set_live(_opret_client("read"), str(oid))
+        except ValueError as e:
+            res[str(oid)] = "error: " + str(e)
+        except requests.RequestException as e:
+            res[str(oid)] = "error: " + eng.err_text(e)
+    print(f"{current_user()['name']} set {sum(1 for v in res.values() if not str(v).startswith('error'))} created offer(s) live.", flush=True)
+    return jsonify(states=res)
+
+
+@app.route("/api/opret/delete", methods=["POST"])
+def api_opret_delete():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    eng = _opret_eng()
+    oid = str((request.get_json(silent=True) or {}).get("id", ""))
+    try:
+        eng.delete_offer(_opret_client("read"), oid)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    except requests.RequestException as e:
+        return jsonify(error=eng.err_text(e)), 502
+    print(f"{current_user()['name']} deleted a paused offer made by the Create page.", flush=True)
+    return jsonify(ok=True)
 
 
 # ---------- orders, buyers, days ----------
@@ -4057,6 +4263,33 @@ body.hide .welcome .w2,body.hide .mny,body.hide #pendsum,body.hide #calsum,body.
 body.redon{overflow:hidden}
 @keyframes redflash{0%{background:#c00000}50%{background:#7a0000}}
 @media (prefers-reduced-motion:reduce){#redscreen{animation:none}}
+
+/* ---- Create offers page ---- */
+.crlist{max-height:380px;overflow:auto;border:1px solid var(--line);border-radius:12px}
+.crrow{display:flex;align-items:center;gap:12px;padding:9px 12px;border-bottom:1px solid var(--line);cursor:pointer}
+.crrow:last-child{border-bottom:0}.crrow:hover{background:var(--panel2)}
+.crrow input[type=checkbox]{width:22px;height:22px;border-radius:7px;background:var(--panel2);border:1px solid var(--line);box-shadow:none}
+.crrow input[type=checkbox]:after{left:6px;top:2px;width:6px;height:11px;border-radius:0;background:none;box-shadow:none;border:solid var(--onaccent);border-width:0 2px 2px 0;transform:rotate(45deg) scale(0);transition:transform .15s}
+.crrow input[type=checkbox]:checked{background:var(--accent);border-color:var(--accent);box-shadow:none}
+.crrow input[type=checkbox]:checked:after{transform:rotate(45deg) scale(1)}
+.crth{width:38px;height:38px;border-radius:9px;background:var(--panel2);border:1px solid var(--line);flex:none;display:grid;place-items:center;font-weight:700;color:var(--muted);overflow:hidden}
+.crth img{width:100%;height:100%;object-fit:cover;display:block}
+.crt{min-width:0;flex:1}.crt b{display:block;font-weight:600;overflow-wrap:anywhere}.crt small{color:var(--muted);font-size:12px}
+.crform{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.crform label{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--muted)}
+.crform input,.crform select{font-size:14px;width:100%}
+.crp{display:grid;grid-template-columns:150px 1fr;gap:6px 14px;padding:12px 0;border-bottom:1px solid var(--line);align-items:start}
+.crp:last-of-type{border-bottom:0}
+.crpm{min-width:0}.crtt{overflow-wrap:anywhere;line-height:1.45}.crtt.new{margin-top:2px;color:var(--ink)}
+.crsmall{font-size:12px;margin-top:4px}.crwhy{color:var(--amber);font-size:12.5px;margin-top:3px}
+.crpm details{margin-top:5px;font-size:12.5px;color:var(--ink2)}.crpm summary{cursor:pointer;color:var(--muted)}
+.crsn{margin-top:4px;overflow-wrap:anywhere;font-size:12.5px}
+mark.o{background:var(--redbg);color:var(--red);text-decoration:line-through;border-radius:4px;padding:0 3px}
+mark.n{background:var(--accentbg);color:var(--accent);border-radius:4px;padding:0 3px;font-weight:650}
+.crwarn{margin-top:10px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--amberbg);color:var(--amber);font-size:13px;overflow-wrap:anywhere}
+.crwarn.bad{background:var(--redbg);color:var(--red);border-color:var(--red)}
+.crbad{color:var(--red)!important}
+@media(max-width:820px){.crlist{max-height:320px}.crrow{gap:10px;padding:9px 10px}.crp{grid-template-columns:1fr}.crp>div:first-child{display:flex;gap:6px;flex-wrap:wrap}}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
@@ -4120,6 +4353,26 @@ body.redon{overflow:hidden}
  <div class="panel"><div class="dyn" id="hlist"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div>
   <div class="row" style="margin-top:12px"><button class="btn" id="hmore" type="button" hidden>Show more</button></div>
   <div class="muted" style="font-size:12.5px;margin-top:10px">Orders from before the history started are shown as added. Cancelled orders only show from when the history started.</div></div>
+</section>
+
+<section class="page" id="p-create">
+ <div class="panel"><h2>1. Choose the offers to copy <span id="cr-keys"></span></h2>
+  <div class="bar2"><input type="search" id="cr-q" placeholder="Search offers"><button class="btn" id="cr-selmatch" type="button">Select all that match "Find"</button><button class="btn" id="cr-selnone" type="button">Select none</button><span class="muted" id="cr-count"></span></div>
+  <div class="dyn crlist" id="cr-list"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div>
+  <div class="muted" style="font-size:12.5px;margin-top:10px">The originals are never changed. Every choice becomes a new copy.</div></div>
+ <div class="panel" style="margin-top:14px"><h2>2. What should change?</h2>
+  <div class="crform">
+   <label><span>Find (a comma means or)</span><input id="cr-find" value="1 year, 12 months" maxlength="120" autocomplete="off"></label>
+   <label><span>Change to</span><input id="cr-repl" value="2 Years" maxlength="80" autocomplete="off"></label>
+   <label><span>Additional info text</span><select id="cr-info"><option value="auto">Automatic (from the new title)</option><option value="1ar">The 1 year text</option><option value="2ar">The 2 years text</option></select></label>
+  </div>
+  <div class="muted" style="font-size:12.5px;margin-top:10px">The find text is swapped in the title and in the description. Everything else (price, pictures, settings) is identical. Each copy gets 1 key in the first account slot ("Scroll Down" + the Additional info text) and is created on pause.</div>
+  <div class="crwarn" id="cr-warn" hidden></div>
+  <div class="row" style="margin-top:12px"><button class="btn on" id="cr-gopreview" type="button">Preview</button></div></div>
+ <div class="panel" id="cr-prev" style="margin-top:14px" hidden></div>
+ <div class="panel" id="cr-run" style="margin-top:14px" hidden></div>
+ <div class="panel" style="margin-top:14px"><h2>Made here <span id="cr-madesum"></span></h2>
+  <div class="dyn" id="cr-made"><div class="empty">Nothing made yet.</div></div></div>
 </section>
 
 <section class="page" id="p-programs"><div class="panel"><h2>Programs <span id="progsum"></span></h2>
@@ -4283,6 +4536,7 @@ body.redon{overflow:hidden}
   <a href="#warroom" data-p="warroom" id="navwar" hidden><svg class="i" viewBox="0 0 24 24"><path d="M21 12a8 8 0 01-11.6 7.1L4 20l1-4.6A8 8 0 1121 12z"/></svg>War-Room<span class="badge" id="wbadge" style="display:none"></span></a>
   <a href="#mindmap" data-p="mindmap" id="navmind" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5"/><circle cx="4.5" cy="5.5" r="2"/><circle cx="19.5" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M10 10.5L6 7M14 10.5l4-3M10.5 14l-3 3.5"/></svg>Mindmap</a>
   <a href="#profit" data-p="profit" id="navprofit" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5c0-1 1-1.5 2.5-1.5s2.5.6 2.5 1.7c0 2.3-5 1.3-5 3.6 0 1.1 1 1.7 2.5 1.7s2.5-.5 2.5-1.5"/></svg>Profit</a>
+  <a href="#create" data-p="create" id="navcreate" hidden><svg class="i" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 8v8M8 12h8"/></svg>Create</a>
   <a href="#server" data-p="server" id="navserver" hidden><svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>Server</a>
   <a href="#programs" data-p="programs" id="navprog" hidden><svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 10l3 2-3 2M13 14h4"/></svg>Programs</a>
   <a href="#users" data-p="users" id="navusers" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-4 3-6 7-6s7 2 7 6M17 5a3.5 3.5 0 010 7M22 20c0-3-2-5-4-5.5"/></svg>Users</a>
@@ -4850,7 +5104,95 @@ const DA={
 "Move up": "Flyt op",
 "Move down": "Flyt ned",
 "Pin": "Fastgør",
-"More tools": "Flere værktøjer"
+"More tools": "Flere værktøjer",
+"Create": "Opret",
+"Create offers": "Opret tilbud",
+"1. Choose the offers to copy": "1. Vælg de tilbud, der skal kopieres",
+"Search offers": "Søg i tilbud",
+"Select all that match \"Find\"": "Vælg alle, der matcher \"Find\"",
+"Select none": "Fravælg alle",
+"The originals are never changed. Every choice becomes a new copy.": "Originalerne ændres aldrig. Hvert valg bliver til en ny kopi.",
+"2. What should change?": "2. Hvad skal ændres?",
+"Find (a comma means or)": "Find (komma betyder eller)",
+"Change to": "Skift til",
+"Additional info text": "Tekst i Additional info",
+"Automatic (from the new title)": "Automatisk (ud fra den nye titel)",
+"The 1 year text": "Teksten til 1 år",
+"The 2 years text": "Teksten til 2 år",
+"The find text is swapped in the title and in the description. Everything else (price, pictures, settings) is identical. Each copy gets 1 key in the first account slot (\"Scroll Down\" + the Additional info text) and is created on pause.": "Find-teksten bliver skiftet ud i titlen og i beskrivelsen. Alt andet (pris, billeder, indstillinger) er identisk. Hver kopi får 1 key i første account-slot (\"Scroll Down\" + teksten i Additional info) og bliver oprettet på pause.",
+"Preview": "Forhåndsvisning",
+"Made here": "Lavet her",
+"Nothing made yet.": "Intet lavet endnu.",
+"Could not read your offers from Eldorado": "Kunne ikke læse dine tilbud fra Eldorado",
+"The file": "Filen",
+"was not found.": "blev ikke fundet.",
+"has no {KEY} where the key must go.": "har ikke {KEY} der, hvor keyen skal stå.",
+"selected": "valgt",
+"No offers found.": "Ingen tilbud fundet.",
+"Live": "Live",
+"Paused": "På pause",
+"Not found": "Findes ikke",
+"Draft": "Kladde",
+"Choose at least one offer first": "Vælg mindst ét tilbud først",
+"Reading from Eldorado…": "Læser fra Eldorado…",
+"Could not make the preview": "Kunne ikke lave forhåndsvisningen",
+"The find text is not in the title - skipped": "Find-teksten står ikke i titlen - springes over",
+"Cannot tell if it is 1 or 2 years - choose the info text above": "Kan ikke se om det er 1 eller 2 år - vælg info-teksten ovenfor",
+"The info file was not found": "Info-filen blev ikke fundet",
+"The info file has no {KEY} in it": "Info-filen har ikke {KEY} i sig",
+"The info text is too long for Eldorado": "Info-teksten er for lang til Eldorado",
+"Could not read it from Eldorado": "Kunne ikke læse det fra Eldorado",
+"Will be created": "Bliver oprettet",
+"No key for this one": "Ingen key til denne",
+"Skipped": "Sprunget over",
+"Description": "Beskrivelse",
+"no change": "ingen ændring",
+"Additional info": "Additional info",
+"Click again to create": "Klik igen for at oprette",
+"paused": "på pause",
+"copy": "kopi",
+"copies": "kopier",
+"will be made": "bliver lavet",
+"Not enough keys for all of them. Add keys on the Keys page and press Preview again.": "Der er ikke keys nok til alle. Læg keys ind på Keys-siden og tryk Forhåndsvisning igen.",
+"3. Preview": "3. Forhåndsvisning",
+"Not started": "Ikke startet",
+"Creating…": "Opretter…",
+"Creating": "Opretter",
+"Created, paused": "Oprettet, på pause",
+"Created and paused - check it": "Oprettet og på pause - tjek den",
+"Failed": "Fejlede",
+"No key left": "Ingen key tilbage",
+"Finished": "Færdig",
+"Stopped at a problem": "Stoppet ved et problem",
+"Stopping…": "Stopper…",
+"Stop after this one": "Stop efter denne",
+"It stopped at the first problem, so nothing more was created. Nothing was changed on the offers you copied from.": "Den stoppede ved det første problem, så der blev ikke oprettet mere. Der er ikke ændret noget på de tilbud, du kopierede fra.",
+"Eldorado did not answer. Check My offers on Eldorado. The key was kept in keys_usikre.txt.": "Eldorado svarede ikke. Tjek My offers på Eldorado. Keyen er gemt i keys_usikre.txt.",
+"An offer was created but NOT paused. Pause it on Eldorado now.": "Et tilbud blev oprettet, men IKKE sat på pause. Sæt det på pause på Eldorado nu.",
+"A copy is not identical to what was meant. It is paused. Check it below, delete it if it is wrong, and send me the text.": "En kopi er ikke identisk med det, der var meningen. Den er på pause. Tjek den nedenfor, slet den hvis den er forkert, og send mig teksten.",
+"Click again to set live": "Klik igen for at sætte live",
+"Set all paused live": "Sæt alle på pause live",
+"Set live": "Sæt live",
+"Could not set live": "Kunne ikke sætte live",
+"Some could not be set live": "Nogle kunne ikke sættes live",
+"Could not delete": "Kunne ikke slette",
+"Deleted": "Slettet",
+"Type what to find first": "Skriv først hvad der skal findes",
+"Copied before": "Kopieret før",
+"Some of these were copied before. Creating them again makes extra copies.": "Nogle af dem er kopieret før. Hvis du opretter dem igen, får du ekstra kopier.",
+"no offers chosen": "ingen tilbud valgt",
+"bad offer id": "ugyldigt tilbuds-id",
+"bad find": "ugyldig find-tekst (mindst 2 tegn)",
+"bad replace": "ugyldig ny tekst",
+"bad info": "ugyldigt info-valg",
+"bad request": "ugyldig anmodning",
+"at most 30 offers at a time": "højst 30 tilbud ad gangen",
+"Nothing to create.": "Der er intet at oprette.",
+"The preview is out of date. Press Preview again.": "Forhåndsvisningen er forældet. Tryk Forhåndsvisning igen.",
+"Something is already being created. Wait for it to finish.": "Der bliver allerede oprettet noget. Vent til det er færdigt.",
+"Not available in preview mode.": "Ikke tilgængelig i forhåndsvisnings-tilstand.",
+"not one of the offers made here": "ikke et af de tilbud, der er lavet her",
+"only paused offers can be deleted here": "kun tilbud på pause kan slettes her"
 };
 
 const $=id=>document.getElementById(id);
@@ -4865,7 +5207,7 @@ const VERSION="2026-10-27b";
 let LANG=lsGet("lang","")||((navigator.language||"").toLowerCase().startsWith("da")?"da":"en");
 const t=s=>(LANG==="da"&&Object.prototype.hasOwnProperty.call(DA,s))?DA[s]:s;
 const LOC=()=>LANG==="da"?"da-DK":"en-GB";
-const DAPL={order:["ordre","ordrer"],key:["key","keys"],offer:["tilbud","tilbud"],unit:["enhed","enheder"],file:["fil","filer"],review:["anmeldelse","anmeldelser"],device:["enhed","enheder"],day:["dag","dage"],event:["hændelse","hændelser"],program:["program","programmer"],time:["gang","gange"]};
+const DAPL={change:["ændring","ændringer"],order:["ordre","ordrer"],key:["key","keys"],offer:["tilbud","tilbud"],unit:["enhed","enheder"],file:["fil","filer"],review:["anmeldelse","anmeldelser"],device:["enhed","enheder"],day:["dag","dage"],event:["hændelse","hændelser"],program:["program","programmer"],time:["gang","gange"]};
 const plural=(n,w)=>LANG==="da"?n+" "+(DAPL[w]||[w,w+"s"])[n===1?0:1]:n+" "+w+(n===1?"":"s");
 const fmt=(n,d=2)=>Number(n).toLocaleString(LOC(),{minimumFractionDigits:d,maximumFractionDigits:d});
 const tm=iso=>new Date(iso).toLocaleTimeString(LOC(),{hour:"2-digit",minute:"2-digit"});
@@ -4957,9 +5299,9 @@ function copyText(text,btn){
 }
 
 // ---------- pages ----------
-const PAGES=["overview","sales","history","orders","stock","reviews","keys","warroom","mindmap","profit","programs","server","users","settings","news"];
-const ADMIN_PAGES=["warroom","mindmap","profit","programs","server","users"];
-const TITLES={overview:"Overview",sales:"Sales",history:"History",programs:"Programs",server:"Server",orders:"Orders",stock:"Stock",reviews:"Reviews",keys:"Keys",warroom:"War-Room",mindmap:"Mindmap",profit:"Profit",users:"Users",settings:"Settings",news:"What's new"};
+const PAGES=["overview","sales","history","orders","stock","reviews","keys","warroom","mindmap","profit","create","programs","server","users","settings","news"];
+const ADMIN_PAGES=["warroom","mindmap","profit","create","programs","server","users"];
+const TITLES={overview:"Overview",sales:"Sales",history:"History",programs:"Programs",server:"Server",orders:"Orders",stock:"Stock",reviews:"Reviews",keys:"Keys",warroom:"War-Room",mindmap:"Mindmap",profit:"Profit",create:"Create offers",users:"Users",settings:"Settings",news:"What's new"};
 const page=()=>{const h=(location.hash||"#overview").slice(1);return PAGES.includes(h)?h:"overview";};
 const seen={};
 function once(name,key,fn){const k=JSON.stringify(key)+"|"+Math.floor(Date.now()/60000);if(seen[name]===k)return;seen[name]=k;fn();}
@@ -5281,7 +5623,7 @@ const CURRENCIES_ALL=()=>[MAIN,"DKK","USD","EUR"];
 const K0=()=>[LANG,HIDE];
 function render(d){
  isAdmin=d.user.role==="admin";
- ["navusers","navwar","navmind","navprofit","navprog","navserver"].forEach(id=>{$(id).hidden=!isAdmin;});
+ ["navusers","navwar","navmind","navprofit","navcreate","navprog","navserver"].forEach(id=>{$(id).hidden=!isAdmin;});
  if(ADMIN_PAGES.includes(page())&&!isAdmin){location.hash="#overview";return;}
  MAIN=d.rates.base;RATES=d.rates.rates;RATES_LIVE=d.rates.live;RATES_DATE=d.rates.date;
  if(!prefsApplied){prefsApplied=true;applyServerPrefs(d.prefs);translateStatic();setTitle();settingsUi();}
@@ -5803,6 +6145,7 @@ function pageLoad(force){
  if(p==="profit"&&isAdmin&&(force||now-TT.profit>15000)){TT.profit=now;loadProfit();}
  if(p==="history"&&(force||now-TT.hist>6000)){TT.hist=now;loadHistory();}
  if(p==="programs"&&isAdmin&&force){loadPrograms();}
+ if(p==="create"&&isAdmin&&(force||!CR.fetched)){loadCreate();}
  if(p==="server"&&isAdmin&&(force||now-TT.srv>8000)){TT.srv=now;loadServer();}
  if(p==="users"&&isAdmin&&(force||now-TT.users>10000)){TT.users=now;users();loadDevices();}
  if(p==="settings"&&(force||now-TT.dev>15000)){TT.dev=now;loadDevices();}
@@ -6366,7 +6709,7 @@ document.body.prepend(defs.firstChild);
 const bar=document.createElement("div");bar.id="fxbar";document.body.appendChild(bar);
 const flash=document.createElement("div");flash.id="fxflash";document.body.appendChild(flash);
 
-const PC={overview:"#38bdf8",sales:"#34d399",history:"#a78bfa",orders:"#60a5fa",stock:"#fbbf24",reviews:"#f472b6",keys:"#2dd4bf",warroom:"#fb923c",mindmap:"#c084fc",profit:"#facc15",programs:"#94a3b8",server:"#22d3ee",users:"#818cf8",settings:"#cbd5e1",news:"#f0abfc"};
+const PC={overview:"#38bdf8",sales:"#34d399",history:"#a78bfa",orders:"#60a5fa",stock:"#fbbf24",reviews:"#f472b6",keys:"#2dd4bf",warroom:"#fb923c",mindmap:"#c084fc",profit:"#facc15",create:"#4ade80",programs:"#94a3b8",server:"#22d3ee",users:"#818cf8",settings:"#cbd5e1",news:"#f0abfc"};
 function curPage(){const h=(location.hash||"#overview").slice(1);return PC[h]?h:"overview";}
 function setPageColor(){const p=curPage();document.body.dataset.page=p;const sk=window.NEXO_SKIN;document.body.style.setProperty("--pc",sk&&sk.acc&&document.documentElement.dataset.theme!=="light"?sk.acc:PC[p]);}
 window.__setPageColor=setPageColor;
@@ -7313,6 +7656,160 @@ if(st&&typeof isAdmin!=="undefined"){
 }
 load();
 })();
+
+// ================= create offers (admin): copies of existing offers, 1 key in each, paused =================
+const CR={fetched:false,offers:[],made:[],copied:{},sel:new Set(),keys:0,info:{},plan:null,args:null,job:null,armed:false,arm:{},lastState:"",loadedOnce:false};
+const crEsc=s=>String(s).replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+function crRx(find){   // the same rule as the server: spaces/hyphens alike, optional plural s, numbers are not the tail of longer numbers
+ try{const alts=String(find).split(",").map(a=>a.trim().split(/[\s-]+/).filter(Boolean)).filter(w=>w.join("").length>=2).map(w=>{
+   const p=w.map(crEsc),l=w[w.length-1];
+   if(/^[A-Za-z]+$/.test(l)&&l.length>2){const b=/s$/i.test(l)?l.slice(0,-1):l;p[p.length-1]=crEsc(b)+"s?";}
+   return "(?<![A-Za-z0-9])"+p.join("[\\s-]+")+"(?![A-Za-z0-9])";});
+  return alts.length?new RegExp(alts.join("|"),"i"):null;}catch(e){return null;}
+}
+const crParts=(parts,cls)=>(parts||[]).map(([x,ch])=>ch?`<mark class="${cls}">${esc(x)}</mark>`:esc(x)).join("");
+const crCopies=n=>n+" "+t(n===1?"copy":"copies");
+const crMoney=(a,c)=>a==null?"":fmt(a,2)+" "+esc(c||"");
+const crStateName=s=>({Active:t("Live"),Paused:t("Paused"),gone:t("Not found"),Draft:t("Draft")}[s]||s||"");
+const crStateCls=s=>({Active:"good",Paused:"warn",gone:"bad"}[s]||"");
+
+async function loadCreate(){
+ if(!isAdmin)return;
+ const f=lsGet("cr-find",""),r0=lsGet("cr-repl","");
+ if(!CR.loadedOnce){CR.loadedOnce=true;if(f)$("cr-find").value=f;if(r0)$("cr-repl").value=r0;}
+ try{const r=await fetch("/api/opret/offers");const j=await r.json().catch(()=>({}));
+  if(!r.ok){$("cr-list").innerHTML=`<div class="empty">${esc(t("Could not read your offers from Eldorado"))}: ${esc(t(j.error||String(r.status)))}</div>`;return;}
+  CR.fetched=true;CR.offers=j.offers||[];CR.made=j.created||[];CR.copied=j.copied||{};CR.keys=j.keys||0;CR.info=j.info||{};
+  const ids=new Set(CR.offers.map(o=>o.id));[...CR.sel].forEach(i=>{if(!ids.has(i))CR.sel.delete(i);});
+  crDraw();crMade();crWarn();pollCreate();
+ }catch(e){}
+}
+function crWarn(){
+ const miss=[];for(const k of ["1ar","2ar"]){const i=CR.info[k];if(!i)continue;
+  if(!i.found)miss.push(t("The file")+" "+i.file+" "+t("was not found."));else if(!i.ok)miss.push(i.file+" "+t("has no {KEY} where the key must go."));}
+ const w=$("cr-warn");w.hidden=!miss.length;w.innerHTML=miss.map(esc).join("<br>");
+}
+function crDraw(){
+ const q=$("cr-q").value.trim().toLowerCase();
+ const list=CR.offers.filter(o=>!q||o.title.toLowerCase().includes(q));
+ $("cr-keys").innerHTML=`<span class="pill ${CR.keys?"good":"bad"}">${plural(CR.keys,"key")} ${t("left")}</span>`;
+ $("cr-list").innerHTML=list.length?list.map(o=>`<label class="crrow"><input type="checkbox" data-crid="${esc(o.id)}" ${CR.sel.has(o.id)?"checked":""}>
+  <span class="crth">${o.image?`<img src="${esc(o.image)}" alt="" loading="lazy" referrerpolicy="no-referrer">`:esc((o.title||"?").trim().slice(0,1).toUpperCase())}</span>
+  <span class="crt"><b>${esc(o.title)}</b><small>${crMoney(o.price,o.currency)}${o.quantity!=null?" · "+t("Stock")+" "+esc(o.quantity):""}</small></span>
+  ${CR.copied[o.id]?`<span class="pill warn">${esc(t("Copied before"))} ×${CR.copied[o.id]}</span>`:""}<span class="pill ${crStateCls(o.state)}">${esc(crStateName(o.state))}</span></label>`).join(""):`<div class="empty">${esc(t("No offers found."))}</div>`;
+ $("cr-count").textContent=CR.sel.size?`${CR.sel.size} ${t("selected")}`:"";
+}
+function crSelectedIds(){return CR.offers.map(o=>o.id).filter(i=>CR.sel.has(i));}
+
+async function crPreview(){
+ const ids=crSelectedIds();
+ if(!ids.length){toast(t("Choose at least one offer first"));return;}
+ const args={ids,find:$("cr-find").value.trim(),repl:$("cr-repl").value.trim(),info:$("cr-info").value};
+ lsSet("cr-find",args.find);lsSet("cr-repl",args.repl);
+ const b=$("cr-gopreview");b.disabled=true;b.textContent=t("Reading from Eldorado…");
+ try{const r=await post("/api/opret/preview",args);const j=await r.json().catch(()=>({}));
+  if(!r.ok){toast(t("Could not make the preview"),t(j.error||""));return;}
+  CR.plan=j;CR.args=args;CR.armed=false;crPrev();
+  $("cr-prev").scrollIntoView({behavior:reduceMotion()?"auto":"smooth",block:"nearest"});
+ }catch(e){toast(t("Could not make the preview"));}finally{b.disabled=false;b.textContent=t("Preview");}
+}
+const CR_WHY={nomatch:"The find text is not in the title - skipped",nokind:"Cannot tell if it is 1 or 2 years - choose the info text above",
+ nofile:"The info file was not found",noplaceholder:"The info file has no {KEY} in it",toolong:"The info text is too long for Eldorado",read:"Could not read it from Eldorado"};
+function crPrev(){
+ const p=CR.plan,box=$("cr-prev");if(!p){box.hidden=true;box.innerHTML="";return;}box.hidden=false;
+ const running=CR.job&&CR.job.state==="running";
+ const rows=p.items.map(it=>{
+  const pill=it.status==="ok"?`<span class="pill good">${t("Will be created")}</span>`:it.status==="nokeys"?`<span class="pill bad">${t("No key for this one")}</span>`:`<span class="pill warn">${t("Skipped")}</span>`;
+  const why=it.status==="skip"?`<div class="crwhy">${esc(t(CR_WHY[it.reason]||it.reason))}${it.msg?": "+esc(it.msg):""}</div>`:"";
+  const ch=it.desc_changes&&it.desc_changes.length?`<details><summary>${esc(t("Description"))}: ${plural(it.desc_n,"change")}</summary>${it.desc_changes.map(c=>`<div class="crsn">…${esc(c.pre)}<mark class="o">${esc(c.old)}</mark><mark class="n">${esc(c.new)}</mark>${esc(c.post)}…</div>`).join("")}</details>`:`<div class="muted crsmall">${esc(t("Description"))}: ${esc(t("no change"))}</div>`;
+  const again=it.copied?`<span class="pill warn">${esc(t("Copied before"))} ×${it.copied}</span>`:"";
+  return `<div class="crp"><div>${pill}${again}</div><div class="crpm"><div class="crtt">${it.status==="skip"&&!it.new_parts.length?esc(it.title||it.id):crParts(it.old_parts,"o")}</div>
+   ${it.new_parts.length&&it.title_n?`<div class="crtt new">→ ${crParts(it.new_parts,"n")}</div>`:""}${why}
+   ${it.status!=="skip"?ch+`<div class="muted crsmall">${esc(t("Additional info"))}: ${esc(it.info_file||"")}</div>`:""}</div></div>`;}).join("");
+ const lacking=p.items.filter(i=>i.status==="nokeys").length;
+ const btn=p.ok?`<button class="btn on" id="cr-create" type="button" ${running?"disabled":""}>${CR.armed?esc(t("Click again to create"))+" "+p.ok:esc(t("Create"))+" "+crCopies(p.ok)+" ("+esc(t("paused"))+")"}</button>`:"";
+ box.innerHTML=`<h2>${esc(t("3. Preview"))} <span>${crCopies(p.ok)} ${t("will be made")} · ${plural(p.keys||0,"key")} ${t("left")}</span></h2>${rows}
+  ${p.items.some(i=>i.copied&&i.status==="ok")?`<div class="crwarn">${esc(t("Some of these were copied before. Creating them again makes extra copies."))}</div>`:""}
+  ${lacking?`<div class="crwarn">${esc(t("Not enough keys for all of them. Add keys on the Keys page and press Preview again."))}</div>`:""}
+  <div class="row" style="margin-top:12px">${btn}<button class="btn" id="cr-closeprev" type="button">${esc(t("Close"))}</button></div>`;
+}
+async function crStart(){
+ if(!CR.plan||!CR.args)return;
+ const n=CR.plan.ok;CR.armed=false;crPrev();
+ try{const r=await post("/api/opret/start",{...CR.args,confirm:true,expect:n});const j=await r.json().catch(()=>({}));
+  if(!r.ok){toast(t("Not started"),t(j.error||""));if(r.status===409&&j.ok!==undefined){crPreview();}return;}
+  CR.plan=null;crPrev();CR.lastState="running";CR.job=null;await pollCreate();
+  $("cr-run").scrollIntoView({behavior:reduceMotion()?"auto":"smooth",block:"nearest"});
+ }catch(e){toast(t("Not started"));}
+}
+async function pollCreate(){
+ if(!isAdmin)return;
+ try{const r=await fetch("/api/opret/status");if(!r.ok)return;const j=await r.json();
+  const prev=CR.lastState;CR.job=j.job;crRun();
+  const st=j.job?j.job.state:"";CR.lastState=st;
+  if(prev==="running"&&st!=="running"){crPrev();loadCreate();}
+ }catch(e){}
+}
+const CR_ST={ok:["Waiting",""],working:["Creating…","warn"],done:["Created, paused","good"],check:["Created and paused - check it","warn"],failed:["Failed","bad"],nokeys:["No key left","bad"]};
+function crRun(){
+ const j=CR.job,box=$("cr-run");if(!j){box.hidden=true;box.innerHTML="";return;}box.hidden=false;
+ const stp={running:["Creating…","warn"],done:["Finished","good"],stopped:["Stopped","warn"],failed:["Stopped at a problem","bad"]}[j.state]||[j.state,""];
+ const rows=j.items.filter(i=>i.status!=="skip").map(i=>{const s=CR_ST[i.status]||[i.status,""];
+  return `<div class="row2"><div class="t">${esc(i.new_title||i.title)}${i.msg?`<small class="${i.status==="failed"?"crbad":""}">${esc(i.msg)}</small>`:""}</div><div class="e"><span class="pill ${s[1]}">${esc(t(s[0]))}</span></div></div>`;}).join("");
+ const notes=[];
+ if(j.state==="failed"){notes.push(t("It stopped at the first problem, so nothing more was created. Nothing was changed on the offers you copied from."));}
+ if(j.items.some(i=>i.reason==="unsure"))notes.push(t("Eldorado did not answer. Check My offers on Eldorado. The key was kept in keys_usikre.txt."));
+ if(j.items.some(i=>i.reason==="nopause"))notes.push(t("An offer was created but NOT paused. Pause it on Eldorado now."));
+ if(j.items.some(i=>i.reason==="differs"))notes.push(t("A copy is not identical to what was meant. It is paused. Check it below, delete it if it is wrong, and send me the text."));
+ box.innerHTML=`<h2>${esc(t("Creating"))} <span><span class="pill ${stp[1]}">${esc(t(stp[0]))}</span> ${j.created} / ${j.total}${j.started?" · "+esc(ago(j.started)):""}</span></h2>${rows}
+  ${j.error&&j.state==="failed"?`<div class="crwarn bad">${esc(j.error)}</div>`:""}${notes.map(n=>`<div class="crwarn">${esc(n)}</div>`).join("")}
+  ${j.state==="running"?`<div class="row" style="margin-top:12px"><button class="btn" id="cr-stop" type="button" ${j.stopping?"disabled":""}>${esc(t(j.stopping?"Stopping…":"Stop after this one"))}</button></div>`:""}`;
+}
+function crMade(){
+ const paused=CR.made.filter(m=>m.state==="Paused");
+ $("cr-madesum").innerHTML=paused.length?`<button class="btn" id="cr-liveall" type="button">${CR.arm.all?esc(t("Click again to set live"))+" "+paused.length:esc(t("Set all paused live"))+" ("+paused.length+")"}</button>`:"";
+ $("cr-made").innerHTML=CR.made.length?CR.made.map(m=>`<div class="row2"><div class="t">${esc(m.title)}<small>${esc(ago(m.time.replace(" ","T")))} · ${esc(m.info||"")}</small></div>
+  <div class="e"><span class="pill ${crStateCls(m.state)}">${esc(crStateName(m.state))}</span>
+  ${m.state==="Paused"?` <button class="btn" data-crlive="${esc(m.id)}" type="button">${CR.arm["l"+m.id]?esc(t("Sure?")):esc(t("Set live"))}</button> <button class="btn" data-crdel="${esc(m.id)}" type="button">${CR.arm["d"+m.id]?esc(t("Sure?")):esc(t("Delete"))}</button>`:""}</div></div>`).join(""):`<div class="empty">${esc(t("Nothing made yet."))}</div>`;
+}
+function crArm(key){   // two clicks needed: the first only asks "sure?"
+ if(CR.arm[key]){delete CR.arm[key];return true;}
+ CR.arm[key]=1;crMade();setTimeout(()=>{if(CR.arm[key]){delete CR.arm[key];crMade();}},4000);return false;
+}
+async function crLive(ids){
+ try{const r=await post("/api/opret/live",{ids});const j=await r.json().catch(()=>({}));
+  if(!r.ok){toast(t("Could not set live"),t(j.error||""));return;}
+  const bad=Object.values(j.states||{}).filter(v=>String(v).startsWith("error"));
+  toast(bad.length?t("Some could not be set live"):t("Set live"),bad.length?String(bad[0]).slice(0,160):"");
+ }catch(e){toast(t("Could not set live"));}
+ loadCreate();
+}
+async function crDelete(id){
+ try{const r=await post("/api/opret/delete",{id});const j=await r.json().catch(()=>({}));
+  if(!r.ok){toast(t("Could not delete"),t(j.error||""));return;}
+  toast(t("Deleted"));
+ }catch(e){toast(t("Could not delete"));}
+ loadCreate();
+}
+document.addEventListener("input",e=>{if(e.target.id==="cr-q")crDraw();});
+document.addEventListener("change",e=>{
+ const c=e.target.closest&&e.target.closest("[data-crid]");
+ if(c){c.checked?CR.sel.add(c.dataset.crid):CR.sel.delete(c.dataset.crid);$("cr-count").textContent=CR.sel.size?`${CR.sel.size} ${t("selected")}`:"";}
+});
+document.addEventListener("click",async e=>{
+ const id=e.target.id;
+ if(id==="cr-selnone"){CR.sel.clear();crDraw();return;}
+ if(id==="cr-selmatch"){const rx=crRx($("cr-find").value);if(!rx){toast(t("Type what to find first"));return;}
+  CR.offers.forEach(o=>{if(rx.test(o.title))CR.sel.add(o.id);});crDraw();return;}
+ if(id==="cr-gopreview"){crPreview();return;}
+ if(id==="cr-closeprev"){CR.plan=null;crPrev();return;}
+ if(id==="cr-create"){if(!CR.armed){CR.armed=true;crPrev();setTimeout(()=>{if(CR.armed){CR.armed=false;crPrev();}},5000);return;}crStart();return;}
+ if(id==="cr-stop"){await post("/api/opret/stop");pollCreate();return;}
+ if(id==="cr-liveall"){if(!crArm("all"))return;crLive(CR.made.filter(m=>m.state==="Paused").map(m=>m.id));return;}
+ const lv=e.target.closest("[data-crlive]");if(lv){if(!crArm("l"+lv.dataset.crlive))return;crLive([lv.dataset.crlive]);return;}
+ const dl=e.target.closest("[data-crdel]");if(dl){if(!crArm("d"+dl.dataset.crdel))return;crDelete(dl.dataset.crdel);return;}
+});
+setInterval(()=>{if(page()==="create"&&isAdmin&&!document.hidden&&CR.job&&CR.job.state==="running")pollCreate();},1500);
 
 </script></body></html>"""
 
