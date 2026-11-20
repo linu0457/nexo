@@ -132,6 +132,12 @@ def legacy_ids(offers):
     return {"offer": orig, "offer2": hits[0]["id"] if len(hits) == 1 else None}
 
 
+def legacy_2year_state(offers):
+    """Why the old 2 Years program can or cannot find its offer: ok | ambiguous (several offers fit) | none."""
+    hits = [o for o in offers if all(w in o["title"].lower() for w in ("netflix", "2 year")) and o["id"] != LEGACY_ORIGINAL_ID]
+    return "ok" if len(hits) == 1 else "ambiguous" if hits else "none"
+
+
 def legacy_entries(offers):
     """What runs today without a saved list: the original 12 Months offer (standard text) and the 2 Years offer, both up to 100."""
     leg = legacy_ids(offers)

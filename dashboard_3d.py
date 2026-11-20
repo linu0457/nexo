@@ -1764,7 +1764,7 @@ def api_restock_offers():
     old, saved = _rs_old(offers)
     entries = [{"id": e["id"], "target": e.get("target"), "info": e.get("info", "auto"), "title": e.get("title", "")} for e in old]
     return jsonify(offers=offers, entries=entries, saved=saved, keys=_opret_keys().left(), info=rc.info_status(_opret_loader()),
-                   programs=_rs_status(), managed=bool(_prog_managed) or DEMO, demo=DEMO)
+                   programs=_rs_status(), managed=bool(_prog_managed) or DEMO, demo=DEMO, legacy2=rc.legacy_2year_state(offers))
 
 
 @app.route("/api/restock/state")
@@ -1818,6 +1818,11 @@ def _rs_apply(entries, infos):
                 p.args, p.info_file = rc.program_args(want[oid], infos[oid]), infos[oid]      # (a later restart then starts with it)
         else:
             p.gone = True                                   # it stops by itself between two rounds and is not started again
+            p.wake.set()
+    keep = {id(p) for p in alive.values()}
+    for p in list(_progs.values()):                         # an old program that cannot be matched to an offer on the list (e.g. the 2 Years
+        if p.script == "offer.py" and not p.ended and id(p) not in keep:      # program when several offers fit its words): the list replaces it
+            p.gone = True
             p.wake.set()
     if not _prog_managed:
         return
@@ -5639,6 +5644,7 @@ const DA={
 "No offers are ticked. Saving turns auto restock off for all offers.": "Ingen tilbud er afkrydset. Gem slår auto restock fra for alle tilbud.",
 "Some of the offers cannot be saved. Nothing was changed.": "Nogle af tilbuddene kan ikke gemmes. Der blev ikke ændret noget.",
 "A new max stock or a new Additional info text is picked up in the next round, no restart needed. Offers you untick stop by themselves after their current round.": "Et nyt maks. lager eller en ny Additional info-tekst bruges i næste runde, uden genstart. Tilbud, du fjerner krydset ved, stopper af sig selv efter deres nuværende runde.",
+"The old 2 Years program cannot tell which of your 2-year offers it should fill up (several fit), so it keeps stopping. Tick the 2-year offers you want and save: the list replaces it.": "Det gamle 2 Years-program kan ikke se, hvilket af dine 2-års-tilbud det skal fylde op (flere passer), så det bliver ved med at stoppe. Sæt kryds ved de 2-års-tilbud, du vil have, og gem: listen erstatter det.",
 "At most 40 offers can be on the list": "Der kan højst være 40 tilbud på listen",
 "Not saved": "Ikke gemt",
 "Auto restock is updated.": "Auto restock er opdateret."
@@ -8387,7 +8393,7 @@ document.addEventListener("click",async e=>{
 setInterval(()=>{if(page()==="fill"&&isAdmin&&!document.hidden&&FL.job&&FL.job.state==="running")pollFill();},1500);
 
 // ================= auto restock (admin): which offers fill up by themselves, and up to what =================
-const RS={fetched:false,offers:[],sel:new Map(),saved:false,keys:0,info:{},programs:{},managed:true,plan:null,sent:null,armed:false,dirty:false,loadedOnce:false};
+const RS={legacy2:"ok",fetched:false,offers:[],sel:new Map(),saved:false,keys:0,info:{},programs:{},managed:true,plan:null,sent:null,armed:false,dirty:false,loadedOnce:false};
 const RS_MODES=[["auto","Automatic (from the title)"],["1ar","The 1 year text"],["2ar","The 2 years text"],["default","The standard text (additional_info.txt)"]];
 const RS_WHY={...CR_WHY,nokind:"Cannot tell if it is 1 or 2 years from the title - choose an info text for this offer"};
 const RS_ST={running:["Running","good"],stopping:["Stops after this round","warn"],starting:["Starting…","warn"],restarting:["Restarting","warn"],crashed:["Stopped, starting again","warn"],missing:["File not found","bad"],stopped:["Stopped","bad"]};
@@ -8399,7 +8405,7 @@ async function loadRestock(reset){
  if(!RS.loadedOnce){RS.loadedOnce=true;const n=parseInt(lsGet("rs-all","100"),10);if(n>=1&&n<=9999)$("rs-all").value=n;}
  try{const r=await fetch("/api/restock/offers");const j=await r.json().catch(()=>({}));
   if(!r.ok){$("rs-list").innerHTML=`<div class="empty">${esc(t("Could not read your offers from Eldorado"))}: ${esc(t(j.error||String(r.status)))}</div>`;return;}
-  RS.fetched=true;RS.offers=j.offers||[];RS.keys=j.keys||0;RS.info=j.info||{};RS.programs=j.programs||{};RS.managed=j.managed!==false;RS.saved=!!j.saved;
+  RS.fetched=true;RS.offers=j.offers||[];RS.keys=j.keys||0;RS.info=j.info||{};RS.programs=j.programs||{};RS.managed=j.managed!==false;RS.saved=!!j.saved;RS.legacy2=j.legacy2||"ok";
   if(reset||!RS.dirty){RS.sel=new Map((j.entries||[]).map(e=>[e.id,{target:e.target,info:e.info||"auto",title:e.title||""}]));RS.dirty=false;RS.plan=null;RS.armed=false;rsPrev();}
   rsDraw();
  }catch(e){}
@@ -8441,6 +8447,7 @@ function rsCount(){
  const note=$("rs-note");
  const bits=[];
  if(!RS.saved)bits.push(t("Nothing has been saved on this page yet. The two programs that always ran (the 12 Months offer and the 2 Years offer, each up to 100) keep running as before and are ticked below. Change the list and save to take over."));
+ if(!RS.saved&&RS.legacy2==="ambiguous")bits.push(t("The old 2 Years program cannot tell which of your 2-year offers it should fill up (several fit), so it keeps stopping. Tick the 2-year offers you want and save: the list replaces it."));
  if(!RS.managed)bits.push(t("The dashboard is not starting programs on this server. Saving stores the list, but nothing is started from here."));
  note.hidden=!bits.length;note.innerHTML=bits.map(esc).join("<br>");
 }
