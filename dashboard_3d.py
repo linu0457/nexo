@@ -4633,6 +4633,7 @@ mark.n{background:var(--accentbg);color:var(--accent);border-radius:4px;padding:
 .rshint{flex:1 1 200px;min-width:0;align-self:center;overflow-wrap:anywhere}
 .rshint .crwhy{margin-top:0}
 @media(max-width:820px){.rsctl{padding-left:0}.rsctl label{flex:1 1 140px}.rsctl input,.rsctl select{width:100%;min-width:0}}
+select option,select optgroup{background-color:Canvas;color:CanvasText}
 </style></head><body><div id="alarm" role="alert" hidden></div>
 <div class="app">
 <main>
