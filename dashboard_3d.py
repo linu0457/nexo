@@ -81,7 +81,7 @@ CURRENCIES = ("DKK", "USD", "EUR")
 SOUNDS = ("ding", "bell", "pop", "chime", "none")
 NOTIFY_KINDS = ("warroom", "orders", "reviews", "keys")
 OVERVIEW_TILES = ("today", "month", "all", "avg", "stock", "profit", "taxpot", "lastorder", "revrate", "pending", "reviews", "keys", "latest", "chart", "stockp", "status", "others", "stockval", "forecast")
-NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys", "warroom", "mindmap", "profit", "create", "programs", "server", "users", "settings", "news")
+NAV_PAGES = ("overview", "sales", "history", "orders", "stock", "reviews", "keys", "warroom", "mindmap", "profit", "create", "fill", "programs", "server", "users", "settings", "news")
 BACKGROUNDS = ("", "dots", "grid", "waves", "aurora", "diagonal")
 DEFAULT_PREFS = {"lang": "", "accent": "", "currency": "", "sound": "ding", "gross": None, "tax": 37,
                  "emoji": "", "color": "", "bg": "", "hide": [], "menu": [], "pins": [], "payout": 5, "ovorder": [],
@@ -1497,7 +1497,7 @@ def api_opret_start():
         return jsonify(error="bad request"), 400
     with _opret["lock"]:
         if _opret["busy"]:
-            return jsonify(error="Something is already being created. Wait for it to finish."), 409
+            return jsonify(error="Another job is running. Wait for it to finish."), 409
         _opret["busy"] = True
     started = False
     try:
@@ -1575,6 +1575,128 @@ def api_opret_delete():
     except requests.RequestException as e:
         return jsonify(error=eng.err_text(e)), 502
     print(f"{current_user()['name']} deleted a paused offer made by the Create page.", flush=True)
+    return jsonify(ok=True)
+
+
+# ---------- fill up: N keys into each chosen offer (admin only) ----------
+# The engine lives in fyld_offers.py. It shares the client, the keys and the "busy" flag with the Create page: one job at a time.
+_fyld = {"job": None}
+
+
+def _fyld_eng():
+    import fyld_offers
+    return fyld_offers
+
+
+@app.route("/api/fyld/offers")
+def api_fyld_offers():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    eng, ceng = _fyld_eng(), _opret_eng()
+    try:
+        offers = eng.list_offers(_opret_client("read"))
+    except requests.RequestException as e:
+        return jsonify(error=ceng.err_text(e)), 502
+    return jsonify(offers=offers, added=list(reversed(eng.read_log()[-40:])), keys=_opret_keys().left(), info=ceng.info_status(_opret_loader()), demo=DEMO)
+
+
+@app.route("/api/fyld/preview", methods=["POST"])
+def api_fyld_preview():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    eng = _fyld_eng()
+    try:
+        ids, n, info = eng.clean_args(request.get_json(silent=True) or {})
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    plan = eng.make_plan(_opret_client("read"), ids, n, info, _opret_keys().left(), _opret_loader())
+    return jsonify(eng.public_plan(plan))
+
+
+def _fyld_snapshot(job):
+    return {"state": job["state"], "added": job["added"], "total": job.get("total", 0), "error": job["error"], "log": job["log"][-30:],
+            "started": job["started"], "finished": job.get("finished", ""), "stopping": job["stop"],
+            "items": [{k: it.get(k, "") for k in ("id", "status", "reason", "msg", "title", "kind", "info_file", "keys", "added", "before", "after")} for it in job["items"]]}
+
+
+def _fyld_run(plan, job, keys, loader):
+    eng = _fyld_eng()
+    now = lambda: datetime.now(timezone.utc).isoformat()
+
+    def emit(msg=None):
+        job["added"] = sum(i.get("added", 0) for i in job["items"])
+        if msg:
+            job["log"].append({"t": now(), "x": str(msg)[:300]})
+    try:
+        res = eng.execute(_opret_client("job"), plan, keys, emit, lambda: job["stop"], loader)
+        job.update(state=res["state"], error=res["error"], added=res["added"])
+    except Exception as e:
+        job.update(state="failed", error=f"{type(e).__name__}: {e}"[:300])
+    finally:
+        job["finished"] = now()
+        with _opret["lock"]:
+            _opret["busy"] = False
+    print(f"Fill up finished: {job['state']}, {job['added']} keys added. {job['error']}", flush=True)
+
+
+@app.route("/api/fyld/start", methods=["POST"])
+def api_fyld_start():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    eng = _fyld_eng()
+    j = request.get_json(silent=True) or {}
+    try:
+        ids, n, info = eng.clean_args(j)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    if j.get("confirm") is not True or not isinstance(j.get("expect"), int) or isinstance(j.get("expect"), bool):
+        return jsonify(error="bad request"), 400
+    with _opret["lock"]:
+        if _opret["busy"]:
+            return jsonify(error="Another job is running. Wait for it to finish."), 409
+        _opret["busy"] = True
+    started = False
+    try:
+        keys, loader = _opret_keys(), _opret_loader()
+        plan = eng.make_plan(_opret_client("job"), ids, n, info, keys.left(), loader)
+        if plan["total"] != j["expect"]:
+            return jsonify(error="The preview is out of date. Press Preview again.", total=plan["total"]), 409
+        if not plan["total"]:
+            return jsonify(error="Nothing to add."), 400
+        todo = [it for it in plan["items"] if it["status"] == "ok"]
+        job = {"state": "running", "added": 0, "total": plan["total"], "error": "", "log": [], "items": plan["items"], "stop": False,
+               "started": datetime.now(timezone.utc).isoformat(), "by": current_user()["name"]}
+        _fyld["job"] = job
+        threading.Thread(target=_fyld_run, args=(plan, job, keys, loader), daemon=True, name="fyld").start()
+        started = True
+        print(f"{job['by']} started adding {plan['total']} keys to {len(todo)} offers ({n} each).", flush=True)
+        return jsonify(ok=True, total=plan["total"])
+    finally:
+        if not started:
+            with _opret["lock"]:
+                _opret["busy"] = False
+
+
+@app.route("/api/fyld/status")
+def api_fyld_status():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    job = _fyld["job"]
+    return jsonify(job=_fyld_snapshot(job) if job else None)
+
+
+@app.route("/api/fyld/stop", methods=["POST"])
+def api_fyld_stop():
+    bad = _opret_guard()
+    if bad:
+        return bad
+    job = _fyld["job"]
+    if job and job["state"] == "running":
+        job["stop"] = True
     return jsonify(ok=True)
 
 
@@ -4382,6 +4504,27 @@ mark.n{background:var(--accentbg);color:var(--accent);border-radius:4px;padding:
   <div class="dyn" id="cr-made"><div class="empty">Nothing made yet.</div></div></div>
 </section>
 
+<section class="page" id="p-fill">
+ <div class="panel"><h2>1. Choose the offers to fill up <span id="fl-keys"></span></h2>
+  <div class="bar2"><input type="search" id="fl-q" placeholder="Search offers"><button class="btn" id="fl-sel1" type="button">Select all with 1 year / 12 months</button><button class="btn" id="fl-sel2" type="button">Select all with 2 years</button><button class="btn" id="fl-selnone" type="button">Select none</button><span class="muted" id="fl-count"></span></div>
+  <div class="dyn crlist" id="fl-list"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div>
+  <div class="muted" style="font-size:12.5px;margin-top:10px">The tag on each offer shows which Additional info text it gets: 1 year / 12 months use the 1 year text, 2 years use the 2 years text.</div></div>
+ <div class="panel" style="margin-top:14px"><h2>2. How many keys in each?</h2>
+  <div class="crform">
+   <label><span>Keys in each offer</span><input id="fl-n" type="number" min="1" max="200" step="1" value="5" inputmode="numeric"></label>
+   <label><span>Additional info text</span><select id="fl-info"><option value="auto">Automatic (from the title)</option><option value="1ar">The 1 year text</option><option value="2ar">The 2 years text</option></select></label>
+  </div>
+  <div class="chips" style="margin-top:10px"><button class="chip" type="button" data-flq="1">1</button><button class="chip" type="button" data-flq="5">5</button><button class="chip" type="button" data-flq="10">10</button><button class="chip" type="button" data-flq="25">25</button><button class="chip" type="button" data-flq="50">50</button></div>
+  <div id="fl-calc" style="margin-top:12px"></div>
+  <div class="muted" style="font-size:12.5px;margin-top:10px">Every chosen offer gets this many keys, one account slot per key ("Scroll Down" + the Additional info text). The keys are taken from the key list, the same one the auto restock uses.</div>
+  <div class="crwarn" id="fl-warn" hidden></div>
+  <div class="row" style="margin-top:12px"><button class="btn on" id="fl-gopreview" type="button">Preview</button></div></div>
+ <div class="panel" id="fl-prev" style="margin-top:14px" hidden></div>
+ <div class="panel" id="fl-run" style="margin-top:14px" hidden></div>
+ <div class="panel" style="margin-top:14px"><h2>Added here</h2>
+  <div class="dyn" id="fl-made"><div class="empty">Nothing added yet.</div></div></div>
+</section>
+
 <section class="page" id="p-programs"><div class="panel"><h2>Programs <span id="progsum"></span></h2>
  <div class="dyn" id="proglist"><div class="sk line"></div><div class="sk line"></div><div class="sk line"></div></div>
  <div class="muted" style="font-size:12.5px;margin-top:10px">The dashboard starts these programs and starts them again if they stop. Restart one if it seems stuck.</div></div></section>
@@ -4544,6 +4687,7 @@ mark.n{background:var(--accentbg);color:var(--accent);border-radius:4px;padding:
   <a href="#mindmap" data-p="mindmap" id="navmind" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5"/><circle cx="4.5" cy="5.5" r="2"/><circle cx="19.5" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M10 10.5L6 7M14 10.5l4-3M10.5 14l-3 3.5"/></svg>Mindmap</a>
   <a href="#profit" data-p="profit" id="navprofit" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5c0-1 1-1.5 2.5-1.5s2.5.6 2.5 1.7c0 2.3-5 1.3-5 3.6 0 1.1 1 1.7 2.5 1.7s2.5-.5 2.5-1.5"/></svg>Profit</a>
   <a href="#create" data-p="create" id="navcreate" hidden><svg class="i" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 8v8M8 12h8"/></svg>Create</a>
+  <a href="#fill" data-p="fill" id="navfill" hidden><svg class="i" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h9"/><path d="M18 14v6M15 17h6"/></svg>Fill up</a>
   <a href="#server" data-p="server" id="navserver" hidden><svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>Server</a>
   <a href="#programs" data-p="programs" id="navprog" hidden><svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 10l3 2-3 2M13 14h4"/></svg>Programs</a>
   <a href="#users" data-p="users" id="navusers" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-4 3-6 7-6s7 2 7 6M17 5a3.5 3.5 0 010 7M22 20c0-3-2-5-4-5.5"/></svg>Users</a>
@@ -5197,7 +5341,42 @@ const DA={
 "at most 30 offers at a time": "højst 30 tilbud ad gangen",
 "Nothing to create.": "Der er intet at oprette.",
 "The preview is out of date. Press Preview again.": "Forhåndsvisningen er forældet. Tryk Forhåndsvisning igen.",
-"Something is already being created. Wait for it to finish.": "Der bliver allerede oprettet noget. Vent til det er færdigt.",
+"Another job is running. Wait for it to finish.": "Et andet job kører. Vent til det er færdigt.",
+"Fill up": "Fyld op",
+"Fill up offers": "Fyld offers op",
+"1. Choose the offers to fill up": "1. Vælg de tilbud, der skal fyldes op",
+"Select all with 1 year / 12 months": "Vælg alle med 1 år / 12 måneder",
+"Select all with 2 years": "Vælg alle med 2 år",
+"The tag on each offer shows which Additional info text it gets: 1 year / 12 months use the 1 year text, 2 years use the 2 years text.": "Mærket på hvert tilbud viser, hvilken Additional info-tekst det får: 1 år / 12 måneder bruger 1-års-teksten, 2 år bruger 2-års-teksten.",
+"2. How many keys in each?": "2. Hvor mange keys i hver?",
+"Keys in each offer": "Keys i hvert tilbud",
+"Automatic (from the title)": "Automatisk (ud fra titlen)",
+"Every chosen offer gets this many keys, one account slot per key (\"Scroll Down\" + the Additional info text). The keys are taken from the key list, the same one the auto restock uses.": "Hvert valgt tilbud får så mange keys, ét account-slot pr. key (\"Scroll Down\" + teksten i Additional info). Keysene tages fra key-listen, den samme som auto restock bruger.",
+"1 year": "1 år",
+"2 years": "2 år",
+"Unknown": "Ukendt",
+"Choose offers above and the number of keys for each.": "Vælg tilbud ovenfor og antal keys til hver.",
+"Not enough keys for all of them. The last offers get fewer or none. Add keys on the Keys page.": "Der er ikke keys nok til alle. De sidste tilbud får færre eller ingen. Læg keys op på Keys-siden.",
+"Type how many keys each offer should get (1 to 200)": "Skriv hvor mange keys hvert tilbud skal have (1 til 200)",
+"wanted": "ønsket",
+"Click again to add": "Klik igen for at lægge op",
+"will be added to": "bliver lagt op i",
+"Eldorado only lets a limited number of keys through at a time. If it refuses, this waits 5 minutes and carries on by itself.": "Eldorado lader kun et begrænset antal keys igennem ad gangen. Afviser den, venter programmet 5 minutter og fortsætter selv.",
+"Adding…": "Lægger op…",
+"Waiting for Eldorado…": "Venter på Eldorado…",
+"Partly done": "Delvist færdig",
+"Check the stock": "Tjek lageret",
+"Stop after this key": "Stop efter denne key",
+"Adding keys": "Lægger keys op",
+"Eldorado only lets a limited number of keys through at a time. It waits 5 minutes and carries on by itself. You can leave this page.": "Eldorado lader kun et begrænset antal keys igennem ad gangen. Programmet venter 5 minutter og fortsætter selv. Du kan forlade siden.",
+"It stopped at the first problem. The keys that were not added are still in the key list.": "Det stoppede ved det første problem. De keys, der ikke blev lagt op, ligger stadig i key-listen.",
+"Eldorado did not answer. Check the offer on Eldorado. The key was kept in keys_usikre.txt.": "Eldorado svarede ikke. Tjek tilbuddet på Eldorado. Keyen er gemt i keys_usikre.txt.",
+"The stock on Eldorado did not go up as much as the keys that were added. It stopped so no more keys are used in vain. Check the offer on Eldorado.": "Lageret på Eldorado steg ikke lige så meget som antallet af keys, der blev lagt op. Det stoppede, så der ikke bruges flere keys forgæves. Tjek tilbuddet på Eldorado.",
+"Added here": "Lagt op her",
+"Nothing added yet.": "Intet lagt op endnu.",
+"out of keys": "ikke flere keys",
+"bad number of keys": "ugyldigt antal keys",
+"Nothing to add.": "Der er intet at lægge op.",
 "Not available in preview mode.": "Ikke tilgængelig i forhåndsvisnings-tilstand.",
 "not one of the offers made here": "ikke et af de tilbud, der er lavet her",
 "only paused offers can be deleted here": "kun tilbud på pause kan slettes her"
@@ -5307,9 +5486,9 @@ function copyText(text,btn){
 }
 
 // ---------- pages ----------
-const PAGES=["overview","sales","history","orders","stock","reviews","keys","warroom","mindmap","profit","create","programs","server","users","settings","news"];
-const ADMIN_PAGES=["warroom","mindmap","profit","create","programs","server","users"];
-const TITLES={overview:"Overview",sales:"Sales",history:"History",programs:"Programs",server:"Server",orders:"Orders",stock:"Stock",reviews:"Reviews",keys:"Keys",warroom:"War-Room",mindmap:"Mindmap",profit:"Profit",create:"Create offers",users:"Users",settings:"Settings",news:"What's new"};
+const PAGES=["overview","sales","history","orders","stock","reviews","keys","warroom","mindmap","profit","create","fill","programs","server","users","settings","news"];
+const ADMIN_PAGES=["warroom","mindmap","profit","create","fill","programs","server","users"];
+const TITLES={overview:"Overview",sales:"Sales",history:"History",programs:"Programs",server:"Server",orders:"Orders",stock:"Stock",reviews:"Reviews",keys:"Keys",warroom:"War-Room",mindmap:"Mindmap",profit:"Profit",create:"Create offers",fill:"Fill up offers",users:"Users",settings:"Settings",news:"What's new"};
 const page=()=>{const h=(location.hash||"#overview").slice(1);return PAGES.includes(h)?h:"overview";};
 const seen={};
 function once(name,key,fn){const k=JSON.stringify(key)+"|"+Math.floor(Date.now()/60000);if(seen[name]===k)return;seen[name]=k;fn();}
@@ -5631,7 +5810,7 @@ const CURRENCIES_ALL=()=>[MAIN,"DKK","USD","EUR"];
 const K0=()=>[LANG,HIDE];
 function render(d){
  isAdmin=d.user.role==="admin";
- ["navusers","navwar","navmind","navprofit","navcreate","navprog","navserver"].forEach(id=>{$(id).hidden=!isAdmin;});
+ ["navusers","navwar","navmind","navprofit","navcreate","navfill","navprog","navserver"].forEach(id=>{$(id).hidden=!isAdmin;});
  if(ADMIN_PAGES.includes(page())&&!isAdmin){location.hash="#overview";return;}
  MAIN=d.rates.base;RATES=d.rates.rates;RATES_LIVE=d.rates.live;RATES_DATE=d.rates.date;
  if(!prefsApplied){prefsApplied=true;applyServerPrefs(d.prefs);translateStatic();setTitle();settingsUi();}
@@ -6154,6 +6333,7 @@ function pageLoad(force){
  if(p==="history"&&(force||now-TT.hist>6000)){TT.hist=now;loadHistory();}
  if(p==="programs"&&isAdmin&&force){loadPrograms();}
  if(p==="create"&&isAdmin&&(force||!CR.fetched)){loadCreate();}
+ if(p==="fill"&&isAdmin&&(force||!FL.fetched)){loadFill();}
  if(p==="server"&&isAdmin&&(force||now-TT.srv>8000)){TT.srv=now;loadServer();}
  if(p==="users"&&isAdmin&&(force||now-TT.users>10000)){TT.users=now;users();loadDevices();}
  if(p==="settings"&&(force||now-TT.dev>15000)){TT.dev=now;loadDevices();}
@@ -6717,7 +6897,7 @@ document.body.prepend(defs.firstChild);
 const bar=document.createElement("div");bar.id="fxbar";document.body.appendChild(bar);
 const flash=document.createElement("div");flash.id="fxflash";document.body.appendChild(flash);
 
-const PC={overview:"#38bdf8",sales:"#34d399",history:"#a78bfa",orders:"#60a5fa",stock:"#fbbf24",reviews:"#f472b6",keys:"#2dd4bf",warroom:"#fb923c",mindmap:"#c084fc",profit:"#facc15",create:"#4ade80",programs:"#94a3b8",server:"#22d3ee",users:"#818cf8",settings:"#cbd5e1",news:"#f0abfc"};
+const PC={overview:"#38bdf8",sales:"#34d399",history:"#a78bfa",orders:"#60a5fa",stock:"#fbbf24",reviews:"#f472b6",keys:"#2dd4bf",warroom:"#fb923c",mindmap:"#c084fc",profit:"#facc15",create:"#4ade80",fill:"#2dd4bf",programs:"#94a3b8",server:"#22d3ee",users:"#818cf8",settings:"#cbd5e1",news:"#f0abfc"};
 function curPage(){const h=(location.hash||"#overview").slice(1);return PC[h]?h:"overview";}
 function setPageColor(){const p=curPage();document.body.dataset.page=p;const sk=window.NEXO_SKIN;document.body.style.setProperty("--pc",sk&&sk.acc&&document.documentElement.dataset.theme!=="light"?sk.acc:PC[p]);}
 window.__setPageColor=setPageColor;
@@ -7819,6 +7999,129 @@ document.addEventListener("click",async e=>{
  const dl=e.target.closest("[data-crdel]");if(dl){if(!crArm("d"+dl.dataset.crdel))return;crDelete(dl.dataset.crdel);return;}
 });
 setInterval(()=>{if(page()==="create"&&isAdmin&&!document.hidden&&CR.job&&CR.job.state==="running")pollCreate();},1500);
+
+// ================= fill up offers (admin): N keys into each chosen offer, 1 year / 2 years text automatically =================
+const FL={fetched:false,offers:[],added:[],sel:new Set(),keys:0,info:{},plan:null,args:null,job:null,armed:false,lastState:"",loadedOnce:false};
+const flKind=k=>k==="1ar"?t("1 year"):k==="2ar"?t("2 years"):t("Unknown");
+const flN=()=>{const v=parseInt($("fl-n").value,10);return Number.isFinite(v)?v:0;};
+const flSelectedIds=()=>FL.offers.map(o=>o.id).filter(i=>FL.sel.has(i));
+
+async function loadFill(){
+ if(!isAdmin)return;
+ if(!FL.loadedOnce){FL.loadedOnce=true;const n=parseInt(lsGet("fl-n","5"),10);if(n>=1&&n<=200)$("fl-n").value=n;}
+ try{const r=await fetch("/api/fyld/offers");const j=await r.json().catch(()=>({}));
+  if(!r.ok){$("fl-list").innerHTML=`<div class="empty">${esc(t("Could not read your offers from Eldorado"))}: ${esc(t(j.error||String(r.status)))}</div>`;return;}
+  FL.fetched=true;FL.offers=j.offers||[];FL.added=j.added||[];FL.keys=j.keys||0;FL.info=j.info||{};
+  const ids=new Set(FL.offers.map(o=>o.id));[...FL.sel].forEach(i=>{if(!ids.has(i))FL.sel.delete(i);});
+  flDraw();flMade();flWarn();pollFill();
+ }catch(e){}
+}
+function flWarn(){
+ const miss=[];for(const k of ["1ar","2ar"]){const i=FL.info[k];if(!i)continue;
+  if(!i.found)miss.push(t("The file")+" "+i.file+" "+t("was not found."));else if(!i.ok)miss.push(i.file+" "+t("has no {KEY} where the key must go."));}
+ const w=$("fl-warn");w.hidden=!miss.length;w.innerHTML=miss.map(esc).join("<br>");
+}
+function flCalc(){
+ const c=FL.sel.size,n=flN(),tot=c*n;
+ $("fl-count").textContent=c?`${c} ${t("selected")}`:"";
+ const box=$("fl-calc");
+ if(!c||n<1){box.innerHTML=`<span class="muted">${esc(t("Choose offers above and the number of keys for each."))}</span>`;return;}
+ box.innerHTML=`<b>${plural(c,"offer")} × ${plural(n,"key")} = ${plural(tot,"key")}</b> <span class="muted">· ${plural(FL.keys,"key")} ${t("left")}</span>`
+  +(tot>FL.keys?`<div class="crwarn">${esc(t("Not enough keys for all of them. The last offers get fewer or none. Add keys on the Keys page."))}</div>`:"");
+}
+function flDraw(){
+ const q=$("fl-q").value.trim().toLowerCase();
+ const list=FL.offers.filter(o=>!q||o.title.toLowerCase().includes(q));
+ $("fl-keys").innerHTML=`<span class="pill ${FL.keys?"good":"bad"}">${plural(FL.keys,"key")} ${t("left")}</span>`;
+ $("fl-list").innerHTML=list.length?list.map(o=>`<label class="crrow"><input type="checkbox" data-flid="${esc(o.id)}" ${FL.sel.has(o.id)?"checked":""}>
+  <span class="crth">${o.image?`<img src="${esc(o.image)}" alt="" loading="lazy" referrerpolicy="no-referrer">`:esc((o.title||"?").trim().slice(0,1).toUpperCase())}</span>
+  <span class="crt"><b>${esc(o.title)}</b><small>${crMoney(o.price,o.currency)}${o.quantity!=null?" · "+t("Stock")+" "+esc(o.quantity):""}</small></span>
+  <span class="pill ${o.kind?"":"warn"}">${esc(flKind(o.kind))}</span><span class="pill ${crStateCls(o.state)}">${esc(crStateName(o.state))}</span></label>`).join(""):`<div class="empty">${esc(t("No offers found."))}</div>`;
+ flCalc();
+}
+
+async function flPreview(){
+ const ids=flSelectedIds(),n=flN();
+ if(!ids.length){toast(t("Choose at least one offer first"));return;}
+ if(n<1||n>200){toast(t("Type how many keys each offer should get (1 to 200)"));return;}
+ const args={ids,n,info:$("fl-info").value};
+ lsSet("fl-n",String(n));
+ const b=$("fl-gopreview");b.disabled=true;b.textContent=t("Reading from Eldorado…");
+ try{const r=await post("/api/fyld/preview",args);const j=await r.json().catch(()=>({}));
+  if(!r.ok){toast(t("Could not make the preview"),t(j.error||""));return;}
+  FL.plan=j;FL.args=args;FL.armed=false;flPrev();
+  $("fl-prev").scrollIntoView({behavior:reduceMotion()?"auto":"smooth",block:"nearest"});
+ }catch(e){toast(t("Could not make the preview"));}finally{b.disabled=false;b.textContent=t("Preview");}
+}
+function flPrev(){
+ const p=FL.plan,box=$("fl-prev");if(!p){box.hidden=true;box.innerHTML="";return;}box.hidden=false;
+ const running=FL.job&&FL.job.state==="running";
+ const rows=p.items.map(it=>{
+  const pill=it.status==="ok"?`<span class="pill ${it.keys<it.want?"warn":"good"}">${plural(it.keys,"key")}${it.keys<it.want?" ("+esc(t("wanted"))+" "+it.want+")":""}</span>`:it.status==="nokeys"?`<span class="pill bad">${t("No key for this one")}</span>`:`<span class="pill warn">${t("Skipped")}</span>`;
+  const why=it.status==="skip"?`<div class="crwhy">${esc(t(CR_WHY[it.reason]||it.reason))}${it.msg?": "+esc(it.msg):""}</div>`:"";
+  const stock=it.status==="ok"&&it.quantity!=null?`<div class="muted crsmall">${esc(t("Stock"))}: ${esc(it.quantity)} → <b>${esc(it.quantity+it.keys)}</b> · ${esc(t("Additional info"))}: ${esc(it.info_file||"")} (${esc(flKind(it.kind))})</div>`:"";
+  return `<div class="crp"><div>${pill}</div><div class="crpm"><div class="crtt">${esc(it.title||it.id)}</div>${why}${stock}</div></div>`;}).join("");
+ const lacking=p.items.filter(i=>i.status==="nokeys").length,short=p.items.some(i=>i.status==="ok"&&i.keys<i.want);
+ const btn=p.total?`<button class="btn on" id="fl-add" type="button" ${running?"disabled":""}>${FL.armed?esc(t("Click again to add"))+" "+plural(p.total,"key"):esc(t("Add"))+" "+plural(p.total,"key")}</button>`:"";
+ box.innerHTML=`<h2>${esc(t("3. Preview"))} <span>${plural(p.total,"key")} ${t("will be added to")} ${plural(p.ok,"offer")} · ${plural(p.keys||0,"key")} ${t("left")}</span></h2>${rows}
+  ${lacking||short?`<div class="crwarn">${esc(t("Not enough keys for all of them. The last offers get fewer or none. Add keys on the Keys page."))}</div>`:""}
+  <div class="muted crsmall" style="margin-top:8px">${esc(t("Eldorado only lets a limited number of keys through at a time. If it refuses, this waits 5 minutes and carries on by itself."))}</div>
+  <div class="row" style="margin-top:12px">${btn}<button class="btn" id="fl-closeprev" type="button">${esc(t("Close"))}</button></div>`;
+}
+async function flStart(){
+ if(!FL.plan||!FL.args)return;
+ const n=FL.plan.total;FL.armed=false;flPrev();
+ try{const r=await post("/api/fyld/start",{...FL.args,confirm:true,expect:n});const j=await r.json().catch(()=>({}));
+  if(!r.ok){toast(t("Not started"),t(j.error||""));if(r.status===409&&j.total!==undefined){flPreview();}return;}
+  FL.plan=null;flPrev();FL.lastState="running";FL.job=null;await pollFill();
+  $("fl-run").scrollIntoView({behavior:reduceMotion()?"auto":"smooth",block:"nearest"});
+ }catch(e){toast(t("Not started"));}
+}
+async function pollFill(){
+ if(!isAdmin)return;
+ try{const r=await fetch("/api/fyld/status");if(!r.ok)return;const j=await r.json();
+  const prev=FL.lastState;FL.job=j.job;flRun();
+  const st=j.job?j.job.state:"";FL.lastState=st;
+  if(prev==="running"&&st!=="running"){flPrev();loadFill();}
+ }catch(e){}
+}
+const FL_ST={ok:["Waiting",""],working:["Adding…","warn"],waiting:["Waiting for Eldorado…","warn"],done:["Done","good"],part:["Partly done","warn"],check:["Check the stock","warn"],failed:["Failed","bad"],nokeys:["No key left","bad"]};
+function flRun(){
+ const j=FL.job,box=$("fl-run");if(!j){box.hidden=true;box.innerHTML="";return;}box.hidden=false;
+ const stp={running:["Adding…","warn"],done:["Finished","good"],stopped:["Stopped","warn"],failed:["Stopped at a problem","bad"]}[j.state]||[j.state,""];
+ const rows=j.items.filter(i=>i.status!=="skip").map(i=>{const s=FL_ST[i.status]||[i.status,""];
+  const prog=i.keys?`${i.added} / ${i.keys}`:"";
+  const stock=i.before!=null&&i.after!=null?` · ${esc(t("Stock"))} ${esc(i.before)} → ${esc(i.after)}`:"";
+  return `<div class="row2"><div class="t">${esc(i.title)}<small>${esc(prog)}${stock}</small>${i.msg?`<small class="${i.status==="failed"||i.status==="check"?"crbad":""}">${esc(i.msg)}</small>`:""}</div><div class="e"><span class="pill ${s[1]}">${esc(t(s[0]))}</span></div></div>`;}).join("");
+ const notes=[];
+ if(j.items.some(i=>i.status==="waiting"))notes.push(t("Eldorado only lets a limited number of keys through at a time. It waits 5 minutes and carries on by itself. You can leave this page."));
+ if(j.state==="failed")notes.push(t("It stopped at the first problem. The keys that were not added are still in the key list."));
+ if(j.items.some(i=>i.reason==="unsure"))notes.push(t("Eldorado did not answer. Check the offer on Eldorado. The key was kept in keys_usikre.txt."));
+ if(j.items.some(i=>i.reason==="stock"))notes.push(t("The stock on Eldorado did not go up as much as the keys that were added. It stopped so no more keys are used in vain. Check the offer on Eldorado."));
+ box.innerHTML=`<h2>${esc(t("Adding keys"))} <span><span class="pill ${stp[1]}">${esc(t(stp[0]))}</span> ${plural(j.added,"key")} / ${j.total}${j.started?" · "+esc(ago(j.started)):""}</span></h2>${rows}
+  ${j.error&&j.state==="failed"?`<div class="crwarn bad">${esc(t(j.error))}</div>`:""}${notes.map(n=>`<div class="crwarn">${esc(n)}</div>`).join("")}
+  ${j.state==="running"?`<div class="row" style="margin-top:12px"><button class="btn" id="fl-stop" type="button" ${j.stopping?"disabled":""}>${esc(t(j.stopping?"Stopping…":"Stop after this key"))}</button></div>`:""}`;
+}
+function flMade(){
+ $("fl-made").innerHTML=FL.added.length?FL.added.map(m=>`<div class="row2"><div class="t">${esc(m.title)}<small>${esc(ago(m.time.replace(" ","T")))} · ${esc(m.info||"")}</small></div>
+  <div class="e"><span class="pill good">+${esc(m.added)}</span> <small class="muted">${esc(t("Stock"))} ${esc(m.before==null?"?":m.before)} → ${esc(m.after==null?"?":m.after)}</small></div></div>`).join(""):`<div class="empty">${esc(t("Nothing added yet."))}</div>`;
+}
+document.addEventListener("input",e=>{if(e.target.id==="fl-q")flDraw();if(e.target.id==="fl-n")flCalc();});
+document.addEventListener("change",e=>{
+ const c=e.target.closest&&e.target.closest("[data-flid]");
+ if(c){c.checked?FL.sel.add(c.dataset.flid):FL.sel.delete(c.dataset.flid);flCalc();}
+});
+document.addEventListener("click",async e=>{
+ const id=e.target.id;
+ if(id==="fl-selnone"){FL.sel.clear();flDraw();return;}
+ if(id==="fl-sel1"||id==="fl-sel2"){const k=id==="fl-sel1"?"1ar":"2ar";FL.offers.forEach(o=>{if(o.kind===k)FL.sel.add(o.id);});flDraw();return;}
+ const q=e.target.closest&&e.target.closest("[data-flq]");if(q){$("fl-n").value=q.dataset.flq;flCalc();return;}
+ if(id==="fl-gopreview"){flPreview();return;}
+ if(id==="fl-closeprev"){FL.plan=null;flPrev();return;}
+ if(id==="fl-add"){if(!FL.armed){FL.armed=true;flPrev();setTimeout(()=>{if(FL.armed){FL.armed=false;flPrev();}},5000);return;}flStart();return;}
+ if(id==="fl-stop"){await post("/api/fyld/stop");pollFill();return;}
+});
+setInterval(()=>{if(page()==="fill"&&isAdmin&&!document.hidden&&FL.job&&FL.job.state==="running")pollFill();},1500);
 
 </script></body></html>"""
 

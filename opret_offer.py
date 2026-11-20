@@ -576,6 +576,8 @@ class DemoClient:
 
     def __init__(self):
         self.db, self.n = {}, 0
+        self.secrets = {}        # offer id -> the account details added to it (key slots)
+        self.hook = None         # tests: a function(method, path, kw) that may raise to pretend Eldorado refuses
         titles = ["Netflix | 12 Months Subscription", "Premium plan 4K | 12 months", "Netflix 1 Year Premium UHD",
                   "NETFLIX 4K ULTRA HD - 1 YEAR WARRANTY", "Netflix Premium 12-Months (Private Profile)",
                   "Netflix | 1-Year Full Access", "Netflix UHD 4K 12 months Instant", "Netflix 1 year | Own profile",
@@ -616,6 +618,18 @@ class DemoClient:
                  "hasOriginalEmail": d.get("hasOriginalEmail"), "offerState": "Active"}
             self.db[nid] = o
             return {"id": nid}
+        if method == "POST" and path.endswith("/secretDetails"):
+            if self.hook:
+                self.hook(method, path, kw)
+            o = self.db.get(path.split("/")[-2])
+            if not o:
+                raise requests.HTTPError(response=_resp(404, "not found"))
+            d = (kw.get("json") or {}).get("structuredDetails") or {}
+            if not d.get("additionalInfo"):
+                raise requests.HTTPError(response=_resp(400, '{"messages":["AdditionalInfo is required"]}'))
+            self.secrets.setdefault(o["id"], []).append(d)
+            o["quantity"] += 1
+            return None
         if method == "PUT" and path.endswith("/pause"):
             self.db[path.split("/")[-2]]["offerState"] = "Paused"
             return None
